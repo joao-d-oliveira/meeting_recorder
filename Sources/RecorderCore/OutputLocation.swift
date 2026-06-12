@@ -20,7 +20,7 @@ public enum OutputLocation {
         let ext = settings.format.rawValue
         var candidate = directory.appendingPathComponent("\(settings.filenamePrefix).\(ext)")
         var counter = 2
-        while fileExists(candidate.path) {
+        while fileExists(candidate.path) && counter <= 9999 {
             candidate = directory.appendingPathComponent("\(settings.filenamePrefix)-\(counter).\(ext)")
             counter += 1
         }
