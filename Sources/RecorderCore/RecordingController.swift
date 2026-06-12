@@ -23,6 +23,7 @@ public final class RecordingController: ObservableObject {
     private var stderrBuffer: [String] = []
     private var levelParser = LevelLineParser()
     private var escalationWork: [DispatchWorkItem] = []
+    private var lastLevelPublish: [InputSource: Date] = [:]
 
     public init(
         makeProcess: @escaping () -> ProcessRunning = { FFmpegProcess() },
@@ -46,6 +47,7 @@ public final class RecordingController: ObservableObject {
 
         stderrBuffer = []
         levelParser = LevelLineParser()
+        lastLevelPublish = [:]
         remoteLevelDB = LevelLineParser.silenceFloorDB
         micLevelDB = LevelLineParser.silenceFloorDB
         self.outputURL = outputURL
@@ -81,6 +83,11 @@ public final class RecordingController: ObservableObject {
             stderrBuffer.removeFirst(stderrBuffer.count - 200)
         }
         guard let sample = levelParser.parse(line: line) else { return }
+        // Throttle meter publishes to ~10 Hz per source: ffmpeg emits ~50-100 level
+        // lines/sec and every @Published write invalidates the whole SwiftUI view tree.
+        let now = clock()
+        if let last = lastLevelPublish[sample.source], now.timeIntervalSince(last) < 0.1 { return }
+        lastLevelPublish[sample.source] = now
         switch sample.source {
         case .remote: remoteLevelDB = sample.rmsDB
         case .mic: micLevelDB = sample.rmsDB

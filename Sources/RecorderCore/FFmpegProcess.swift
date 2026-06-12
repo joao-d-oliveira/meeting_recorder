@@ -11,6 +11,7 @@ public final class FFmpegProcess: ProcessRunning {
     private let stdinPipe = Pipe()
     private let stderrPipe = Pipe()
     private var lineBuffer = ""
+    private let stderrQueue = DispatchQueue(label: "meetingrecorder.ffmpeg.stderr")
 
     public init() {}
 
@@ -24,21 +25,21 @@ public final class FFmpegProcess: ProcessRunning {
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let self else { return }
-            self.lineBuffer += String(decoding: data, as: UTF8.self)
-            // ffmpeg uses \r for in-place progress lines and \n elsewhere; split on both.
-            while let index = self.lineBuffer.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
-                let line = String(self.lineBuffer[..<index])
-                self.lineBuffer = String(self.lineBuffer[self.lineBuffer.index(after: index)...])
-                if !line.isEmpty {
-                    DispatchQueue.main.async { self.onStderrLine?(line) }
-                }
-            }
+            self.stderrQueue.async { self.consumeStderr(data) }
         }
 
         process.terminationHandler = { [weak self] finished in
             guard let self else { return }
-            self.stderrPipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async { self.onTermination?(finished.terminationStatus) }
+            let handle = self.stderrPipe.fileHandleForReading
+            handle.readabilityHandler = nil
+            // Drain whatever the readability handler hadn't delivered yet — on fast
+            // failures the final lines carry the actual error message.
+            let remaining = handle.readDataToEndOfFile()
+            self.stderrQueue.async {
+                self.consumeStderr(remaining)
+                self.flushPartialLine()
+                DispatchQueue.main.async { self.onTermination?(finished.terminationStatus) }
+            }
         }
 
         try process.run()
@@ -58,5 +59,28 @@ public final class FFmpegProcess: ProcessRunning {
 
     public func forceKill() {
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
+
+    /// Runs on stderrQueue only.
+    private func consumeStderr(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lineBuffer += String(decoding: data, as: UTF8.self)
+        // ffmpeg uses \r for in-place progress lines and \n elsewhere; split on both.
+        while let index = lineBuffer.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(lineBuffer[..<index])
+            lineBuffer = String(lineBuffer[lineBuffer.index(after: index)...])
+            if !line.isEmpty {
+                DispatchQueue.main.async { self.onStderrLine?(line) }
+            }
+        }
+    }
+
+    /// Runs on stderrQueue only. Emits a trailing line that lacked a terminator.
+    private func flushPartialLine() {
+        let line = lineBuffer
+        lineBuffer = ""
+        if !line.isEmpty {
+            DispatchQueue.main.async { self.onStderrLine?(line) }
+        }
     }
 }
