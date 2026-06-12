@@ -35,6 +35,7 @@ public enum CommandBuilder {
     }
 
     private static func formatVolume(_ value: Double) -> String {
-        String(format: "%.2f", value)
+        // No-locale formatting is deliberate: a localized "0,55" would break the filtergraph.
+        String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 }
