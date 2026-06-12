@@ -45,7 +45,11 @@ public final class FFmpegProcess: ProcessRunning {
     }
 
     public func writeStdin(_ string: String) {
-        stdinPipe.fileHandleForWriting.write(Data(string.utf8))
+        // Writing to a dead process's pipe raises SIGPIPE / NSFileHandleOperationException,
+        // killing the app. Guard + throwing write (with SIGPIPE ignored at app startup)
+        // turns that into a silent no-op; the pending termination callback resolves state.
+        guard process.isRunning else { return }
+        try? stdinPipe.fileHandleForWriting.write(contentsOf: Data(string.utf8))
     }
 
     public func interrupt() {
