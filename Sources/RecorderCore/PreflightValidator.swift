@@ -37,13 +37,13 @@ public enum PreflightValidator {
         var issues: [PreflightIssue] = []
         let names = Set(availableDevices.map(\.name))
 
-        if let remote = settings.remoteDeviceName {
+        if let remote = settings.remoteDeviceName, !remote.isEmpty {
             if !names.contains(remote) { issues.append(.deviceMissing(name: remote)) }
         } else {
             issues.append(.noRemoteSelected)
         }
 
-        if let mic = settings.micDeviceName {
+        if let mic = settings.micDeviceName, !mic.isEmpty {
             if !names.contains(mic) { issues.append(.deviceMissing(name: mic)) }
         } else {
             issues.append(.noMicSelected)
