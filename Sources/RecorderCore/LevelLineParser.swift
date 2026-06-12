@@ -42,6 +42,6 @@ public final class LevelLineParser {
 
         let rawValue = String(line[valueRange])
         let rmsDB = Double(rawValue) ?? Self.silenceFloorDB
-        return LevelSample(source: source, rmsDB: max(rmsDB, Self.silenceFloorDB))
+        return LevelSample(source: source, rmsDB: min(max(rmsDB, Self.silenceFloorDB), 0))
     }
 }

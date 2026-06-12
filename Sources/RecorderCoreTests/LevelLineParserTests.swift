@@ -13,6 +13,7 @@ func runLevelLineParserTests() {
         let parser = LevelLineParser()
         let sample = parser.parse(line: "[Parsed_ametadata_9 @ 0x600002c10aaa] lavfi.astats.Overall.RMS_level=-5.1")
         try expectEqual(sample?.source, .mic)
+        try expect(abs((sample?.rmsDB ?? 0) - (-5.1)) < 0.0001, "wrong dB value")
     }
 
     test("maps -inf (silence) to the floor value") {
