@@ -65,14 +65,17 @@ public final class RecordingController: ObservableObject {
         state = .stopping
         proc.writeStdin("q")
 
-        let interruptWork = DispatchWorkItem { [weak proc] in proc?.interrupt() }
-        let killWork = DispatchWorkItem { [weak proc] in proc?.forceKill() }
+        // Strong captures: if the controller deallocates mid-stop, escalation still
+        // terminates the orphaned ffmpeg; clean exits cancel these work items anyway.
+        let interruptWork = DispatchWorkItem { proc.interrupt() }
+        let killWork = DispatchWorkItem { proc.forceKill() }
         escalationWork = [interruptWork, killWork]
         DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: interruptWork)
         DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killWork)
     }
 
     private func handleStderr(_ line: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
         stderrBuffer.append(line)
         if stderrBuffer.count > 200 {
             stderrBuffer.removeFirst(stderrBuffer.count - 200)
@@ -85,9 +88,10 @@ public final class RecordingController: ObservableObject {
     }
 
     private func handleTermination(status: Int32) {
+        dispatchPrecondition(condition: .onQueue(.main))
         escalationWork.forEach { $0.cancel() }
         escalationWork = []
-        defer { process = nil }
+        process = nil
 
         switch state {
         case .stopping:
