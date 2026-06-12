@@ -6,4 +6,5 @@ test("harness smoke test") {
 }
 
 runDeviceListParserTests()
+runFFmpegLocatorTests()
 TestRunner.shared.finish()
