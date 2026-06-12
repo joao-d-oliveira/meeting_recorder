@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
             issues = [.ffmpegNotFound]
             return
         }
+        issues.removeAll { $0 == .ffmpegNotFound }
         devices = DeviceScanner.scan(ffmpegPath: path)
     }
 
