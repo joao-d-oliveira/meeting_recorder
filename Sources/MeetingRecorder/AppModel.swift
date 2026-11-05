@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
     }
     @Published var issues: [PreflightIssue] = []
     @Published var showSettingsSheet = false
+    @Published var showFolderPicker = false
 
     let controller = RecordingController()
     private let store: SettingsStore

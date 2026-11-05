@@ -25,4 +25,7 @@ swift run RecorderCoreTests   # run the test suite
 swift run MeetingRecorder     # run the app unbundled (no mic permission prompt)
 ```
 
+A Command Line Tools-only setup (no Xcode) builds fine as long as the app uses no
+SwiftUI property-wrapper macros: keep view state such as `@State` in `AppModel` instead.
+
 Recordings default to `~/Documents/Recordings/meetings/<timestamp>/meeting.flac`.

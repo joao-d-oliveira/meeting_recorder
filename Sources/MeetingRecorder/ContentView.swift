@@ -3,7 +3,6 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var showFolderPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,7 +18,7 @@ struct ContentView: View {
         }
         .padding(20)
         .frame(width: 460)
-        .fileImporter(isPresented: $showFolderPicker, allowedContentTypes: [.folder]) { result in
+        .fileImporter(isPresented: $model.showFolderPicker, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 model.settings.outputFolder = url
             }
@@ -105,7 +104,7 @@ struct ContentView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Button("Change…") { showFolderPicker = true }
+                Button("Change…") { model.showFolderPicker = true }
                     .disabled(model.isRecording)
             }
             Picker("Format", selection: $model.settings.format) {
