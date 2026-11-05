@@ -7,6 +7,7 @@ test("harness smoke test") {
 
 runDeviceListParserTests()
 runFFmpegLocatorTests()
+runFFmpegProcessTests()
 runOutputLocationTests()
 runSettingsStoreTests()
 runCommandBuilderTests()

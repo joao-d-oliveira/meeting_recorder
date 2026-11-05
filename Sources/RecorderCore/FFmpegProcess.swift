@@ -24,7 +24,13 @@ public final class FFmpegProcess: ProcessRunning {
 
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let self else { return }
+            if data.isEmpty {
+                // EOF: nothing is left for the termination drain either. Without this,
+                // GCD keeps re-firing the handler on the closed pipe and spins a core.
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let self else { return }
             self.stderrQueue.async { self.consumeStderr(data) }
         }
 
@@ -42,7 +48,14 @@ public final class FFmpegProcess: ProcessRunning {
             }
         }
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            // The pipe hits EOF without a child, and neither handler would ever be cleared.
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            process.terminationHandler = nil
+            throw error
+        }
     }
 
     public func writeStdin(_ string: String) {
@@ -66,13 +79,16 @@ public final class FFmpegProcess: ProcessRunning {
         guard !data.isEmpty else { return }
         lineBuffer += String(decoding: data, as: UTF8.self)
         // ffmpeg uses \r for in-place progress lines and \n elsewhere; split on both.
-        while let index = lineBuffer.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
-            let line = String(lineBuffer[..<index])
-            lineBuffer = String(lineBuffer[lineBuffer.index(after: index)...])
+        // Scalars, not Characters: "\r\n" is a single Character that matches neither.
+        var rest = lineBuffer.unicodeScalars[...]
+        while let index = rest.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(rest[..<index])
+            rest = rest[rest.index(after: index)...]
             if !line.isEmpty {
                 DispatchQueue.main.async { self.onStderrLine?(line) }
             }
         }
+        lineBuffer = String(rest)
     }
 
     /// Runs on stderrQueue only. Emits a trailing line that lacked a terminator.
