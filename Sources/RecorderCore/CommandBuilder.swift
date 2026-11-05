@@ -22,13 +22,21 @@ public enum CommandBuilder {
             + "alimiter=limit=0.95[mixed]"
         let graph = "\(remoteBranch);\(micBranch);\(mix)"
 
+        // Audio has no keyframes, so +frag_keyframe alone emits no fragments: without
+        // -frag_duration a SIGKILLed m4a has no moov atom and is unplayable.
+        let containerArguments = settings.format == .m4a
+            ? ["-movflags", "+frag_keyframe+empty_moov", "-frag_duration", "1000000"]
+            : []
+
         return [
             "-hide_banner", "-nostats",
             "-thread_queue_size", "1024", "-f", "avfoundation", "-i", ":\(remoteIndex)",
             "-thread_queue_size", "1024", "-f", "avfoundation", "-i", ":\(micIndex)",
             "-filter_complex", graph,
             "-map", "[mixed]",
-        ] + settings.format.codecArguments + [
+        ] + settings.format.codecArguments + containerArguments + [
+            // ffmpeg buffers ~32 KB of output; flushing each packet bounds what a crash loses.
+            "-flush_packets", "1",
             "-n",
             outputURL.path,
         ]

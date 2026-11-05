@@ -21,6 +21,7 @@ func runCommandBuilderTests() {
             "-filter_complex", expectedGraph,
             "-map", "[mixed]",
             "-c:a", "flac",
+            "-flush_packets", "1",
             "-n",
             "/tmp/out/meeting.flac",
         ])
@@ -60,6 +61,33 @@ func runCommandBuilderTests() {
                 outputURL: URL(fileURLWithPath: "/tmp/x.\(format.rawValue)"))
             let codecStart = args.firstIndex(of: "-c:a")!
             try expectEqual(Array(args[codecStart..<(codecStart + expected.count)]), expected)
+        }
+    }
+
+    test("fragments m4a so a killed recording stays playable") {
+        var settings = RecordingSettings()
+        settings.format = .m4a
+        let args = CommandBuilder.arguments(
+            remoteIndex: 0, micIndex: 1, settings: settings,
+            outputURL: URL(fileURLWithPath: "/tmp/out/meeting.m4a"))
+        try expectEqual(Array(args.suffix(8)), [
+            "-movflags", "+frag_keyframe+empty_moov", "-frag_duration", "1000000",
+            "-flush_packets", "1",
+            "-n", "/tmp/out/meeting.m4a",
+        ])
+    }
+
+    test("only m4a gets movflags; every format flushes packets") {
+        for format in AudioFormat.allCases {
+            var settings = RecordingSettings()
+            settings.format = format
+            let args = CommandBuilder.arguments(
+                remoteIndex: 0, micIndex: 1, settings: settings,
+                outputURL: URL(fileURLWithPath: "/tmp/x.\(format.rawValue)"))
+            try expectEqual(args.contains("-movflags"), format == .m4a)
+            let flush = args.firstIndex(of: "-flush_packets")
+            try expect(flush != nil && args[flush! + 1] == "1", "\(format): -flush_packets 1 missing")
+            try expect(flush! < args.firstIndex(of: "-n")!, "\(format): -flush_packets must precede -n")
         }
     }
 

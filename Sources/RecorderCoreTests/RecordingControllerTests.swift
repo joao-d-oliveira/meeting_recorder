@@ -34,9 +34,12 @@ func runRecordingControllerTests() {
         return url
     }
 
-    func makeController() -> (RecordingController, FakeProcess) {
+    func makeController(
+        interruptAfter: TimeInterval = 5, killAfter: TimeInterval = 10
+    ) -> (RecordingController, FakeProcess) {
         let fake = FakeProcess()
-        let controller = RecordingController(makeProcess: { fake })
+        let controller = RecordingController(
+            makeProcess: { fake }, interruptAfter: interruptAfter, killAfter: killAfter)
         return (controller, fake)
     }
 
@@ -92,6 +95,67 @@ func runRecordingControllerTests() {
             throw TestFailure(description: "expected .failed, got \(controller.state)")
         }
         try expect(message.contains("missing or empty"), "unexpected message: \(message)")
+    }
+
+    test("exit after stop with empty file ends in failed") {
+        let (controller, fake) = makeController()
+        let file = makeTempFile(content: "")
+        defer { try? FileManager.default.removeItem(at: file) }
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: file)
+        controller.stop()
+        fake.terminate(status: 0)
+        guard case .failed(let message, _) = controller.state else {
+            throw TestFailure(description: "expected .failed, got \(controller.state)")
+        }
+        try expect(message.contains("missing or empty"), "unexpected message: \(message)")
+    }
+
+    test("non-zero exit after stop is not reported as a clean save") {
+        // 255 = SIGINT exit, 9 = SIGKILL, 1 = ffmpeg error
+        for status: Int32 in [255, 9, 1] {
+            let (controller, fake) = makeController()
+            let file = makeTempFile()
+            defer { try? FileManager.default.removeItem(at: file) }
+            controller.start(ffmpegPath: "/ff", arguments: [], outputURL: file)
+            controller.stop()
+            fake.emitStderr("Exiting normally, received signal 2.")
+            fake.terminate(status: status)
+            guard case .failed(let message, let tail) = controller.state else {
+                throw TestFailure(description: "status \(status): expected .failed, got \(controller.state)")
+            }
+            try expect(message.contains("didn't stop cleanly"), "unexpected message: \(message)")
+            try expect(message.contains("status \(status)"), "status missing from: \(message)")
+            try expect(message.contains(file.path), "path missing from: \(message)")
+            try expectEqual(tail, ["Exiting normally, received signal 2."])
+        }
+    }
+
+    test("stop escalates to interrupt then kill when ffmpeg does not exit") {
+        let (controller, fake) = makeController(interruptAfter: 0.05, killAfter: 0.15)
+        let file = makeTempFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: file)
+        controller.stop()
+        Thread.sleep(forTimeInterval: 0.5)
+        try expect(fake.interrupted, "SIGINT escalation did not fire")
+        try expect(fake.killed, "SIGKILL escalation did not fire")
+        fake.terminate(status: 9)
+        guard case .failed(let message, _) = controller.state else {
+            throw TestFailure(description: "expected .failed after forced kill, got \(controller.state)")
+        }
+        try expect(message.contains("didn't stop cleanly"), "unexpected message: \(message)")
+    }
+
+    test("exit after stop cancels pending escalation") {
+        let (controller, fake) = makeController(interruptAfter: 0.05, killAfter: 0.15)
+        let file = makeTempFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: file)
+        controller.stop()
+        fake.terminate(status: 0)
+        Thread.sleep(forTimeInterval: 0.4)
+        try expect(!fake.interrupted && !fake.killed, "escalation fired after a clean exit")
+        try expectEqual(controller.state, .saved(file))
     }
 
     test("unexpected exit while recording ends in failed with stderr tail") {

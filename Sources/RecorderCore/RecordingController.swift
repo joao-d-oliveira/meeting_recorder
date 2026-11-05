@@ -17,6 +17,8 @@ public final class RecordingController: ObservableObject {
     private let makeProcess: () -> ProcessRunning
     private let fileManager: FileManager
     private let clock: () -> Date
+    private let interruptAfter: TimeInterval
+    private let killAfter: TimeInterval
 
     private var process: ProcessRunning?
     private var outputURL: URL?
@@ -28,11 +30,15 @@ public final class RecordingController: ObservableObject {
     public init(
         makeProcess: @escaping () -> ProcessRunning = { FFmpegProcess() },
         fileManager: FileManager = .default,
-        clock: @escaping () -> Date = Date.init
+        clock: @escaping () -> Date = Date.init,
+        interruptAfter: TimeInterval = 5,
+        killAfter: TimeInterval = 10
     ) {
         self.makeProcess = makeProcess
         self.fileManager = fileManager
         self.clock = clock
+        self.interruptAfter = interruptAfter
+        self.killAfter = killAfter
     }
 
     public func start(ffmpegPath: String, arguments: [String], outputURL: URL) {
@@ -72,8 +78,8 @@ public final class RecordingController: ObservableObject {
         let interruptWork = DispatchWorkItem { proc.interrupt() }
         let killWork = DispatchWorkItem { proc.forceKill() }
         escalationWork = [interruptWork, killWork]
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: interruptWork)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killWork)
+        DispatchQueue.global().asyncAfter(deadline: .now() + interruptAfter, execute: interruptWork)
+        DispatchQueue.global().asyncAfter(deadline: .now() + killAfter, execute: killWork)
     }
 
     private func handleStderr(_ line: String) {
@@ -102,7 +108,7 @@ public final class RecordingController: ObservableObject {
 
         switch state {
         case .stopping:
-            finalize()
+            finalize(exitStatus: status)
         case .recording:
             state = .failed(
                 message: "ffmpeg exited unexpectedly (status \(status))",
@@ -112,18 +118,27 @@ public final class RecordingController: ObservableObject {
         }
     }
 
-    private func finalize() {
+    private func finalize(exitStatus: Int32) {
         guard let url = outputURL else {
             state = .failed(message: "Internal error: no output URL", stderrTail: [])
             return
         }
         let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
-        if fileManager.fileExists(atPath: url.path), size > 0 {
-            state = .saved(url)
-        } else {
+        guard fileManager.fileExists(atPath: url.path), size > 0 else {
             state = .failed(
                 message: "Recording file is missing or empty",
                 stderrTail: Array(stderrBuffer.suffix(20)))
+            return
         }
+        // A clean 'q' stop exits 0. Non-zero here means ffmpeg was signalled (SIGINT -> 255,
+        // SIGKILL -> 9) and the container trailer may not have been written.
+        guard exitStatus == 0 else {
+            state = .failed(
+                message: "ffmpeg didn't stop cleanly (status \(exitStatus)); "
+                    + "the partial file may be incomplete: \(url.path)",
+                stderrTail: Array(stderrBuffer.suffix(20)))
+            return
+        }
+        state = .saved(url)
     }
 }
