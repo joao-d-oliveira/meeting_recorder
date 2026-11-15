@@ -11,8 +11,10 @@ public enum RecordingState: Equatable {
 
 public final class RecordingController: ObservableObject {
     @Published public private(set) var state: RecordingState = .idle
-    @Published public private(set) var remoteLevelDB: Double = LevelLineParser.silenceFloorDB
-    @Published public private(set) var micLevelDB: Double = LevelLineParser.silenceFloorDB
+    /// Latest RMS level (dB) of each recorded input, indexed like the `inputs` passed to
+    /// `CommandBuilder.arguments`. Empty before the first recording; reset to the silence
+    /// floor whenever a recording starts.
+    @Published public private(set) var levelsDB: [Double] = []
 
     private let makeProcess: () -> ProcessRunning
     private let fileManager: FileManager
@@ -23,9 +25,9 @@ public final class RecordingController: ObservableObject {
     private var process: ProcessRunning?
     private var outputURL: URL?
     private var stderrBuffer: [String] = []
-    private var levelParser = LevelLineParser()
+    private var levelParser = LevelLineParser(inputCount: 0)
     private var escalationWork: [DispatchWorkItem] = []
-    private var lastLevelPublish: [InputSource: Date] = [:]
+    private var lastLevelPublish: [Int: Date] = [:]
 
     public init(
         makeProcess: @escaping () -> ProcessRunning = { FFmpegProcess() },
@@ -41,7 +43,9 @@ public final class RecordingController: ObservableObject {
         self.killAfter = killAfter
     }
 
-    public func start(ffmpegPath: String, arguments: [String], outputURL: URL) {
+    /// `inputCount` is the number of inputs in `arguments`; it sizes `levelsDB` and bounds
+    /// which ffmpeg level lines are accepted.
+    public func start(ffmpegPath: String, arguments: [String], outputURL: URL, inputCount: Int) {
         switch state {
         case .recording, .stopping: return
         default: break
@@ -52,10 +56,9 @@ public final class RecordingController: ObservableObject {
         proc.onTermination = { [weak self] status in self?.handleTermination(status: status) }
 
         stderrBuffer = []
-        levelParser = LevelLineParser()
+        levelParser = LevelLineParser(inputCount: inputCount)
         lastLevelPublish = [:]
-        remoteLevelDB = LevelLineParser.silenceFloorDB
-        micLevelDB = LevelLineParser.silenceFloorDB
+        levelsDB = Array(repeating: LevelLineParser.silenceFloorDB, count: max(0, inputCount))
         self.outputURL = outputURL
         self.process = proc
 
@@ -89,15 +92,13 @@ public final class RecordingController: ObservableObject {
             stderrBuffer.removeFirst(stderrBuffer.count - 200)
         }
         guard let sample = levelParser.parse(line: line) else { return }
-        // Throttle meter publishes to ~10 Hz per source: ffmpeg emits ~50-100 level
+        guard levelsDB.indices.contains(sample.inputIndex) else { return }
+        // Throttle meter publishes to ~10 Hz per input: ffmpeg emits ~50-100 level
         // lines/sec and every @Published write invalidates the whole SwiftUI view tree.
         let now = clock()
-        if let last = lastLevelPublish[sample.source], now.timeIntervalSince(last) < 0.1 { return }
-        lastLevelPublish[sample.source] = now
-        switch sample.source {
-        case .remote: remoteLevelDB = sample.rmsDB
-        case .mic: micLevelDB = sample.rmsDB
-        }
+        if let last = lastLevelPublish[sample.inputIndex], now.timeIntervalSince(last) < 0.1 { return }
+        lastLevelPublish[sample.inputIndex] = now
+        levelsDB[sample.inputIndex] = sample.rmsDB
     }
 
     private func handleTermination(status: Int32) {

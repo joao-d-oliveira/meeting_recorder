@@ -2,68 +2,127 @@ import Foundation
 import RecorderCore
 
 func runPreflightValidatorTests() {
-    let devices = [
-        AudioDevice(index: 0, name: "BlackHole 2ch"),
-        AudioDevice(index: 1, name: "MacBook Air Microphone"),
-    ]
+    let earbuds = AudioDevice(index: 3, name: "WF-1000XM6")
+    let blackHole = AudioDevice(index: 0, name: "BlackHole 2ch")
+    let mic = AudioDevice(index: 1, name: "MacBook Air Microphone")
+    let devices = [blackHole, mic]
+    let allDevices = [blackHole, mic, earbuds]
 
-    func validSettings() -> RecordingSettings {
-        var settings = RecordingSettings(outputFolder: FileManager.default.temporaryDirectory
-            .appendingPathComponent("preflight-\(UUID().uuidString)", isDirectory: true))
-        settings.remoteDeviceName = "BlackHole 2ch"
-        settings.micDeviceName = "MacBook Air Microphone"
-        return settings
+    func makeSettings(inputs: [InputConfig] = InputConfig.defaultInputs) -> RecordingSettings {
+        RecordingSettings(
+            inputs: inputs,
+            outputFolder: FileManager.default.temporaryDirectory
+                .appendingPathComponent("preflight-\(UUID().uuidString)", isDirectory: true))
     }
 
-    test("all good yields no issues and creates the output folder") {
-        let settings = validSettings()
-        let issues = PreflightValidator.validate(
+    func validate(
+        _ settings: RecordingSettings, devices: [AudioDevice],
+        ffmpegPath: String? = "/opt/homebrew/bin/ffmpeg", micAuthorized: Bool = true
+    ) -> PreflightResult {
+        PreflightValidator.validate(
             settings: settings, availableDevices: devices,
-            ffmpegPath: "/opt/homebrew/bin/ffmpeg", micAuthorized: true)
-        try expectEqual(issues, [])
+            ffmpegPath: ffmpegPath, micAuthorized: micAuthorized)
+    }
+
+    // MARK: validator
+
+    test("all inputs connected: no issues, no notices, folder created, inputs resolved") {
+        let settings = makeSettings()
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: allDevices)
+        try expectEqual(result.issues, [])
+        try expectEqual(result.notices, [])
+        try expect(result.canStart, "should be able to start")
+        try expectEqual(result.resolvedInputs.count, 3)
         try expect(FileManager.default.fileExists(atPath: settings.outputFolder.path),
                    "output folder was not created")
-        try? FileManager.default.removeItem(at: settings.outputFolder)
     }
 
-    test("missing selections are reported") {
-        var settings = validSettings()
+    test("disconnected skipIfMissing device is a notice, not an issue") {
+        let settings = makeSettings()
         defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
-        settings.remoteDeviceName = nil
-        settings.micDeviceName = nil
-        let issues = PreflightValidator.validate(
-            settings: settings, availableDevices: devices,
-            ffmpegPath: "/ff", micAuthorized: true)
-        try expect(issues.contains(.noRemoteSelected), "noRemoteSelected missing")
-        try expect(issues.contains(.noMicSelected), "noMicSelected missing")
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [])
+        try expectEqual(result.notices, [.inputSkipped(deviceName: "WF-1000XM6")])
+        try expect(result.canStart, "skipping must not block Start")
+        try expectEqual(result.resolvedInputs, [
+            ResolvedInput(deviceIndex: 0, gain: 0.55),
+            ResolvedInput(deviceIndex: 1, gain: 1.0),
+        ])
     }
 
-    test("selected device that disappeared is reported by name") {
-        var settings = validSettings()
+    test("no inputs is an issue") {
+        let settings = makeSettings(inputs: [])
         defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
-        settings.remoteDeviceName = "Jabra Elite 8 Active"
-        let issues = PreflightValidator.validate(
-            settings: settings, availableDevices: devices,
-            ffmpegPath: "/ff", micAuthorized: true)
-        try expect(issues.contains(.deviceMissing(name: "Jabra Elite 8 Active")),
-                   "deviceMissing not reported: \(issues)")
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.noInputs])
+        try expect(!result.canStart, "empty input list must block Start")
+    }
+
+    test("an input without a device name is an issue naming its position") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "BlackHole 2ch", gain: 1),
+            InputConfig(deviceName: "", gain: 1),
+            InputConfig(deviceName: "  ", gain: 1),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.inputHasNoDevice(position: 2), .inputHasNoDevice(position: 3)])
+    }
+
+    test("missing device without skipIfMissing is an issue, reported once per name") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "Jabra Elite 8 Active", gain: 1),
+            InputConfig(deviceName: "Jabra Elite 8 Active", gain: 0.5),
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 1),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.deviceMissing(name: "Jabra Elite 8 Active")])
+    }
+
+    test("every input skipped is an issue, and the skipped devices are still listed") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "WF-1000XM6", gain: 0.55, skipIfMissing: true),
+            InputConfig(deviceName: "Jabra", gain: 1, skipIfMissing: true),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.allInputsSkipped])
+        try expectEqual(result.notices, [
+            .inputSkipped(deviceName: "WF-1000XM6"), .inputSkipped(deviceName: "Jabra"),
+        ])
+        try expectEqual(result.resolvedInputs, [])
+    }
+
+    test("all-skipped is not added on top of a more specific input problem") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "WF-1000XM6", gain: 0.55, skipIfMissing: true),
+            InputConfig(deviceName: "Jabra", gain: 1),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.deviceMissing(name: "Jabra")])
     }
 
     test("missing ffmpeg and denied mic access are reported") {
-        let settings = validSettings()
+        let settings = makeSettings()
         defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
-        let issues = PreflightValidator.validate(
-            settings: settings, availableDevices: devices,
-            ffmpegPath: nil, micAuthorized: false)
-        try expect(issues.contains(.ffmpegNotFound), "ffmpegNotFound missing")
-        try expect(issues.contains(.microphoneAccessDenied), "microphoneAccessDenied missing")
+        let result = validate(settings, devices: allDevices, ffmpegPath: nil, micAuthorized: false)
+        try expect(result.issues.contains(.ffmpegNotFound), "ffmpegNotFound missing")
+        try expect(result.issues.contains(.microphoneAccessDenied), "microphoneAccessDenied missing")
+        try expect(!result.canStart, "must not start")
     }
 
-    test("issues have user-readable descriptions") {
+    test("issues and notices have user-readable descriptions") {
         try expect(PreflightIssue.ffmpegNotFound.description.contains("brew install ffmpeg"),
                    "ffmpeg issue should tell the user how to install it")
         try expect(PreflightIssue.deviceMissing(name: "Jabra").description.contains("Jabra"),
                    "device issue should name the device")
+        try expect(PreflightIssue.inputHasNoDevice(position: 3).description.contains("3"),
+                   "input issue should name the position")
+        try expect(PreflightNotice.inputSkipped(deviceName: "WF-1000XM6").description.contains("WF-1000XM6"),
+                   "notice should name the skipped device")
     }
 
     test("uncreateable output folder is reported") {
@@ -76,14 +135,12 @@ func runPreflightValidatorTests() {
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readonlyBase.path)
 
-        var settings = validSettings()
+        var settings = makeSettings()
         settings.outputFolder = readonlyBase.appendingPathComponent("sub", isDirectory: true)
-        let issues = PreflightValidator.validate(
-            settings: settings, availableDevices: devices,
-            ffmpegPath: "/ff", micAuthorized: true)
-        try expect(issues.contains { issue in
+        let result = validate(settings, devices: allDevices, ffmpegPath: "/ff")
+        try expect(result.issues.contains { issue in
             if case .outputFolderNotWritable = issue { return true }
             return false
-        }, "outputFolderNotWritable not reported: \(issues)")
+        }, "outputFolderNotWritable not reported: \(result.issues)")
     }
 }

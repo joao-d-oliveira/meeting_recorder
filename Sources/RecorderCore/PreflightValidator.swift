@@ -1,21 +1,26 @@
 import Foundation
 
+/// A problem that blocks starting a recording.
 public enum PreflightIssue: Equatable, CustomStringConvertible {
-    case noRemoteSelected
-    case noMicSelected
+    case noInputs
+    /// `position` is 1-based, as shown to the user.
+    case inputHasNoDevice(position: Int)
     case deviceMissing(name: String)
+    case allInputsSkipped
     case ffmpegNotFound
     case microphoneAccessDenied
     case outputFolderNotWritable(path: String)
 
     public var description: String {
         switch self {
-        case .noRemoteSelected:
-            return "Select a remote/system audio source (e.g. BlackHole 2ch)."
-        case .noMicSelected:
-            return "Select a microphone."
+        case .noInputs:
+            return "Add at least one audio input."
+        case .inputHasNoDevice(let position):
+            return "Input \(position) has no device selected."
         case .deviceMissing(let name):
-            return "Device \"\(name)\" is not available. Refresh devices and pick another."
+            return "Device \"\(name)\" is not available. Reconnect it, pick another, or turn on \"Skip if missing\"."
+        case .allInputsSkipped:
+            return "None of the selected devices are connected, so there is nothing to record."
         case .ffmpegNotFound:
             return "ffmpeg was not found. Install it with: brew install ffmpeg"
         case .microphoneAccessDenied:
@@ -26,6 +31,39 @@ public enum PreflightIssue: Equatable, CustomStringConvertible {
     }
 }
 
+/// Something worth telling the user that does not block the recording.
+public enum PreflightNotice: Equatable, CustomStringConvertible {
+    case inputSkipped(deviceName: String)
+
+    public var description: String {
+        switch self {
+        case .inputSkipped(let name):
+            return "\"\(name)\" is not connected and was skipped."
+        }
+    }
+}
+
+public struct PreflightResult: Equatable {
+    /// Blocking problems. Recording may start only when this is empty.
+    public let issues: [PreflightIssue]
+    /// Non-blocking messages (e.g. skipped devices).
+    public let notices: [PreflightNotice]
+    /// How the configured inputs matched the connected devices.
+    public let inputs: InputResolution
+
+    public init(issues: [PreflightIssue], notices: [PreflightNotice], inputs: InputResolution) {
+        self.issues = issues
+        self.notices = notices
+        self.inputs = inputs
+    }
+
+    public var canStart: Bool { issues.isEmpty }
+
+    /// The inputs to record, ready for `CommandBuilder.arguments(inputs:settings:outputURL:)`.
+    /// Only meaningful when `canStart`.
+    public var resolvedInputs: [ResolvedInput] { inputs.resolvedInputs }
+}
+
 public enum PreflightValidator {
     public static func validate(
         settings: RecordingSettings,
@@ -33,20 +71,30 @@ public enum PreflightValidator {
         ffmpegPath: String?,
         micAuthorized: Bool,
         fileManager: FileManager = .default
-    ) -> [PreflightIssue] {
+    ) -> PreflightResult {
         var issues: [PreflightIssue] = []
-        let names = Set(availableDevices.map(\.name))
+        var notices: [PreflightNotice] = []
 
-        if let remote = settings.remoteDeviceName, !remote.isEmpty {
-            if !names.contains(remote) { issues.append(.deviceMissing(name: remote)) }
-        } else {
-            issues.append(.noRemoteSelected)
+        let resolution = InputResolver.resolve(inputs: settings.inputs, devices: availableDevices)
+
+        if settings.inputs.isEmpty {
+            issues.append(.noInputs)
         }
-
-        if let mic = settings.micDeviceName, !mic.isEmpty {
-            if !names.contains(mic) { issues.append(.deviceMissing(name: mic)) }
-        } else {
-            issues.append(.noMicSelected)
+        for position in resolution.unnamedPositions {
+            issues.append(.inputHasNoDevice(position: position + 1))
+        }
+        for input in resolution.missing {
+            let issue = PreflightIssue.deviceMissing(name: input.deviceName)
+            if !issues.contains(issue) { issues.append(issue) }
+        }
+        for input in resolution.skipped {
+            let notice = PreflightNotice.inputSkipped(deviceName: input.deviceName)
+            if !notices.contains(notice) { notices.append(notice) }
+        }
+        // Only when every other input problem is absent: otherwise the root cause is above.
+        if resolution.recorded.isEmpty, !resolution.skipped.isEmpty,
+           resolution.missing.isEmpty, resolution.unnamedPositions.isEmpty {
+            issues.append(.allInputsSkipped)
         }
 
         if ffmpegPath == nil { issues.append(.ffmpegNotFound) }
@@ -61,6 +109,6 @@ public enum PreflightValidator {
             issues.append(.outputFolderNotWritable(path: settings.outputFolder.path))
         }
 
-        return issues
+        return PreflightResult(issues: issues, notices: notices, inputs: resolution)
     }
 }
