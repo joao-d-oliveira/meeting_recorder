@@ -18,18 +18,35 @@ Goal: the app records exactly what the script records, and can produce the same 
 
 - `RecordingSettings.inputs: [InputConfig]` (see `Sources/RecorderCore/InputConfig.swift`) replaces
   `remoteDeviceName`, `micDeviceName`, `remoteVolume`, `micVolume`. Default = `InputConfig.defaultInputs`.
+  `RecordingSettings.transcription: TranscriptionSettings` holds the Phase 2 preferences.
 - Settings persisted before this change (legacy keys) migrate to two inputs: remote then mic with their
-  saved volumes. Decoding is per-field tolerant (`decodeIfPresent` + defaults) so one bad/missing
-  field no longer resets every setting.
-- Preflight: at least one input; every input must have a device name; a missing device is an error
-  unless `skipIfMissing`, in which case it is skipped and reported as a non-blocking notice. If every
-  input would be skipped, that is an error.
+  saved volumes (0.55 / 1.00 if a volume is missing). A legacy side with no device name is dropped; if
+  both are dropped (the user never picked a device) the defaults apply. Decoding is per-field tolerant
+  (`decodeIfPresent` + defaults, also inside each `InputConfig` and for each element of `inputs`) so one
+  bad/missing field no longer resets every setting. The `SettingsStore` key (`settings.v1`) is unchanged;
+  the legacy keys are read for migration and never written back.
+- `InputResolver.resolve(inputs:devices:)` matches inputs to the scanned devices by exact name and returns
+  an `InputResolution`: `recorded` (config + `ResolvedInput`, in configured order), `skipped`
+  (disconnected, `skipIfMissing`), `missing` (disconnected, blocking) and `unnamedPositions` (blank
+  device name, blocking). `resolvedInputs` is what the command builder takes.
+- Preflight returns a `PreflightResult`: `issues` (blocking; Start is allowed only when empty), `notices`
+  (non-blocking, one `inputSkipped(deviceName:)` per skipped device) and the `InputResolution`.
+  Issues: no inputs; an input without a device name (1-based position); a missing device not marked
+  `skipIfMissing`; every input skipped (only reported when no more specific input problem exists);
+  plus ffmpeg / microphone access / output folder as before.
 - `CommandBuilder.arguments(inputs: [ResolvedInput], settings:, outputURL:)` builds, for input *i*:
   `[i:a]aresample=48000,aformat=channel_layouts=mono,volume=G,astats=…,ametadata=…[in<i>]`
   then `[in0]…[inN-1]amix=inputs=N:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[mixed]`.
-  With the default three inputs and meters stripped, the filtergraph must equal the script's.
-- Level meters: one per input. The ametadata filter of branch *i* is `Parsed_ametadata_<5*i+4>`.
-  `LevelLineParser` returns the input position; `RecordingController` publishes `levelsDB: [Double]`.
+  With the default three inputs and meters stripped, the filtergraph must equal the script's
+  (`CommandBuilder.filterGraph(gains:includeMeters:)`; tests compare against the script text, and run the
+  generated graph through real ffmpeg with `sine` sources for 1, 2 and 3 inputs).
+- Level meters: one per input. The ametadata filter of branch *i* is `Parsed_ametadata_<5*i+4>`
+  (`CommandBuilder.ametadataInstanceID(forInput:)`). `LevelLineParser(inputCount:)` returns the input
+  position (`LevelSample.inputIndex`); `RecordingController.start(…, inputCount:)` publishes
+  `levelsDB: [Double]` (one entry per recorded input, silence floor on start, 10 Hz per input).
+- UI: one row per input (device picker that keeps a disconnected saved name visible, gain slider + value,
+  "Skip if missing", live meter while recording, remove), **Add input**, **Reset to defaults**. Inputs
+  are read-only while recording or stopping. Skipped devices are shown as notices and never block Start.
 
 ## Phase 2: transcription
 
