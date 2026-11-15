@@ -30,10 +30,13 @@ The app mixes N inputs into one FLAC. The defaults match
 | BlackHole 2ch | 0.55 | The far side of the call |
 | MacBook Air Microphone | 1.00 | Your voice |
 
-The inputs are editable in the app's Settings (device name, gain, whether a
-missing device is skipped or blocks the recording). Each input has its own level
-meter while recording. A missing device that is not marked "skip if missing"
-blocks the recording and names the device.
+The inputs are edited in the main window, in the **Audio Inputs** list: one row per
+input with a device picker, a gain slider, "Skip if missing" and a remove button, plus
+**Add input** and **Reset to defaults** under the list. A missing device that is not
+marked "skip if missing" blocks the recording and names the device. Each input has its
+own level meter while recording, and the inputs cannot be changed until it stops. With
+more inputs than fit on the screen the list scrolls. Settings (gear icon) holds the
+filename prefix, one-folder-per-recording, the ffmpeg path and the transcription options.
 
 Settings saved by older versions (one remote device plus one microphone) are
 migrated to two inputs automatically.
@@ -49,9 +52,46 @@ Recordings are saved to `~/Documents/Recordings/meetings/<timestamp>/meeting.fla
 
 ## Transcribe
 
-After a recording is saved, use the Transcribe button (enter the guest's name
-first; there is also an auto-transcribe option in Settings). Everything runs
-locally; no audio leaves the machine.
+The **Transcription** section at the bottom of the main window always shows one audio
+file, named as `<recording folder>/<file>` (every recording is called `meeting.flac`, so
+the folder tells them apart). Everything runs locally; no audio leaves the machine.
+
+1. **A saved recording** appears there with a guest-name field (its placeholder is the
+   default guest name from Settings) and a **Transcribe** button. With *Transcribe
+   automatically after recording* switched on in Settings, it starts by itself on save,
+   using the default guest name; you can re-run with another name afterwards.
+2. **An existing file:** **Transcribe a file…** (top right of the section) opens a file
+   picker for flac, wav, m4a and mp3. The panel then shows that file, ready for a guest
+   name and **Transcribe**.
+3. **Running:** the stage ("Converting audio…", "Transcribing…", "Identifying
+   speakers…"; "Setting up (first run only)…" while the Python environment is created),
+   a progress bar (determinate during the Transcribing stage, indeterminate otherwise),
+   the elapsed time and **Cancel** (it reads "Cancelling…" until the pipeline has
+   stopped).
+4. **Finished:** turns, duration, speaking time per person in minutes, how the
+   interviewer was identified (the voiceprint similarity of each speaker), the number of
+   uncertain `(?)` turns, and how long it took. If the voice match was weak, an orange
+   "Weak voice match — check the labels by reading the first turns" warning appears.
+   **Open transcript** opens the `.md` in its default app, **Show in Finder** selects
+   it, **Transcribe again…** returns to the guest-name field (to re-run with another
+   name).
+5. **Failed:** the error, a "Pipeline output" disclosure with the last lines of the
+   pipeline's output, and **Retry**. **Cancelled:** a short note and **Transcribe
+   again**.
+
+Recording and transcribing are independent: you can start a new recording while a
+transcription runs. A transcription stays tied to the file it was started for. A
+recording saved meanwhile shows up as "New recording saved: …" with a **Transcribe…**
+button once the run has ended (with auto-transcribe on it starts by itself after a
+successful run). When the panel moves to another file, the last transcript stays as an
+"Earlier: …" line with **Open** and **Show**, with its weak-match warning if it had one.
+Quitting the app (Cmd-Q or closing the window) while a transcription runs asks for
+confirmation and then cancels it.
+
+Settings (gear icon), "Transcription" group: *Transcribe automatically after
+recording*, *Interviewer name*, *Default guest name* and *Pipeline folder* (type a path
+or **Choose…**, **Clear** goes back to the bundled copy). The sheet shows which pipeline
+will be used, or a red "Pipeline not found".
 
 - Pipeline: mlx-whisper `large-v3-turbo` for the text, plus a voiceprint
   (SpeechBrain ECAPA) to decide who is speaking. The pipeline is bundled with the
@@ -60,10 +100,15 @@ locally; no audio leaves the machine.
   `~/.cache/diarize`, so there is no second setup.
 - First run downloads the models and sets up the environment, which takes a
   while. After that expect roughly 1-2 minutes per 10 minutes of audio.
-- Output, next to the recording: `<Guest>_Transcript.md` and
+- Output, in the audio file's own folder: `<Guest>_Transcript.md` and
   `<Guest>_Transcript.summary.json` (turns, duration, speaking time per speaker,
   how the interviewer was identified, weak-match flag, count of uncertain `(?)`
-  turns). The app shows this summary and can open the transcript.
+  turns). A transcript with the same guest name in that folder is replaced; the panel
+  warns before you start. (With "Create one folder per recording" off, all recordings
+  share a folder, so use different guest names.)
+- The text is raw Whisper output: proper names are often misspelled and words at a
+  speaker change can land in the neighbouring turn. Check the first turns, and the
+  `(?)` ones, against the audio.
 - Two speakers only, labelled Interviewer and Interviewee.
 - Needs an existing voiceprint at `~/.cache/diarize/voiceprint-<name>.npy`
   (name = the interviewer name in Settings). The `interview-transcribe` skill

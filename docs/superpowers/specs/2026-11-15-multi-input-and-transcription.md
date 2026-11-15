@@ -64,9 +64,34 @@ Goal: the app records exactly what the script records, and can produce the same 
   including `/opt/homebrew/bin:/usr/local/bin` (apps launched from Finder have a minimal PATH),
   publishes stage/progress, supports cancel, and on success parses the summary JSON into a
   `TranscriptionResult`.
-- UI: after "Saved", a guest-name field + **Transcribe** button (or automatic when
-  `TranscriptionSettings.autoTranscribe`), progress, then the summary (turns, speaking time,
-  identification + weak-match warning, `(?)` count) with **Open transcript** / **Show in Finder**.
+- UI (`Sources/MeetingRecorder/TranscriptionPanel.swift`, state in `AppModel`): a **Transcription** section at
+  the bottom of the main window shows one audio file at a time, labelled `<folder>/<file>` (every recording is
+  `meeting.flac`). `AppModel.transcriptionTarget` is that file; it only changes while no run is in progress,
+  so a run is always tied to the file it was started for.
+  - A saved recording becomes the target and gets a guest-name field (placeholder = default guest name) and
+    **Transcribe**; with `autoTranscribe` it starts at once with the default guest name. **Transcribe a file…**
+    (`NSOpenPanel`, flac/wav/m4a/mp3) targets any existing file. The output directory is that file's folder.
+  - Running: stage title, a determinate bar while `progress` is non-nil (transcribe stage) and an indeterminate
+    one otherwise, elapsed time, **Cancel** (reads "Cancelling…" and is disabled while `isCancelling`).
+  - Finished: turns, duration, speaking minutes per person, identification (voiceprint scores by role, or the
+    pipeline's own text for cross-file), `(?)` count, time taken, an orange "Weak voice match — check the labels
+    by reading the first turns" warning when `weakMatch`, **Open transcript** (`NSWorkspace.open`),
+    **Show in Finder**, **Transcribe again…** (back to the guest field). Failed: message, "Pipeline output"
+    disclosure with the log tail, guest field with **Retry**. Cancelled: note, guest field with
+    **Transcribe again**. An existing `<Guest>_Transcript.md` that a new run would replace is flagged before
+    starting.
+  - Recording and transcribing are independent. A recording saved during a run is not shown in place of it: it
+    waits in a "New recording saved" row (**Transcribe…** once the run ended; started automatically after a
+    successful run when `autoTranscribe`). When the target moves on after a successful run, that transcript stays
+    as a one-line "Earlier" row (**Open**, **Show**, weak-match mark).
+  - Settings sheet, "Transcription" group: auto-transcribe toggle, interviewer name, default guest name, pipeline
+    folder override (text field, **Choose…**, **Clear**) plus which pipeline `PipelineLocator` resolves (or a
+    red "Pipeline not found", or an orange note when the chosen folder has no `run.sh`).
+  - Quit (Cmd-Q or closing the window): with a transcription running the user confirms, the run is cancelled
+    (SIGINT, SIGKILL after 4 s) and the quit waits at most 6 s (12 s if a recording is also being finalized). A
+    recording saved because of the quit does not auto-start a transcription.
+  - Layout: the window is sized to its content, so the inputs list scrolls above a screen-dependent cap
+    (150-340 pt) and each input row keeps gain and "Skip if missing" on one line.
 
 ## Known limits (from the pipeline itself)
 

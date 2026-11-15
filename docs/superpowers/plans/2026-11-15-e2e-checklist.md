@@ -13,8 +13,10 @@ Tick a box only when the expected result was observed; note failures next to the
   Expected: you can hear it, and BlackHole receives it.
 - [ ] **Inputs present.** `ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -i -E "WF-1000XM6|BlackHole|MacBook Air Microphone"` (or `record-meeting.sh --check`).
   Expected: all three devices are listed with an index.
-- [ ] **Defaults.** Open Settings (fresh settings, or reset the inputs).
-  Expected: three inputs in order: WF-1000XM6 (gain 0.55, skip if missing), BlackHole 2ch (0.55), MacBook Air Microphone (1.00). ffmpeg detected at `/opt/homebrew/bin/ffmpeg`.
+- [ ] **Defaults.** Look at the **Audio Inputs** list in the main window (fresh settings, or click **Reset to defaults**), then open Settings with the gear icon.
+  Expected: three inputs in order: WF-1000XM6 (gain 0.55, skip if missing), BlackHole 2ch (0.55), MacBook Air Microphone (1.00). The Settings sheet says "Using ffmpeg at /opt/homebrew/bin/ffmpeg" and "Using pipeline at ..." (no red "Pipeline not found"). Close it with Done.
+- [ ] **Window size.** With the three inputs and a finished transcription showing (section 5), compare the window with the screen (also while recording).
+  Expected: the whole window fits on the laptop display without resizing; the inputs list scrolls instead of the window growing, and the Transcription section is fully visible.
 
 ## 1. Three-input recording
 
@@ -35,14 +37,16 @@ Tick a box only when the expected result was observed; note failures next to the
   Expected: recording proceeds with two inputs; a non-blocking notice names the skipped earbuds. Only two meters appear (or the earbuds meter is absent/idle). Stop: Saved, file plays with the other two inputs.
 - [ ] Reconnect the earbuds, Start again.
   Expected: three inputs again, no notice.
-- [ ] Temporarily rename the BlackHole input in Settings to a nonexistent name (e.g. `BlackHole 99ch`), or uninstall/disable it, then Start.
-  Expected: Start is blocked; the message names the missing device; no recording is created. Restore the name afterwards.
-- [ ] Set every input to a nonexistent name with skip-if-missing on.
-  Expected: blocked, with an error that nothing is left to record. Restore the defaults afterwards.
-- [ ] Remove all inputs (or blank a device name).
-  Expected: blocked with a message ("at least one input" / "device name required"). Restore the defaults afterwards.
-- [ ] Settings > ffmpeg path override = `/nonexistent/ffmpeg`, Start.
-  Expected: error says ffmpeg was not found and how to install it. Clear the override; "Using ffmpeg at /opt/homebrew/bin/ffmpeg" reappears.
+- [ ] In the main window untick **Skip if missing** on the earbuds row, disconnect the earbuds (or turn them off), then Start Recording.
+  Expected: Start is blocked; the message names the missing device ("Device "WF-1000XM6" is not available..."); no recording is created. Tick Skip if missing again afterwards.
+- [ ] Remove the BlackHole and MacBook microphone rows (minus buttons), keep the earbuds row with Skip if missing on, disconnect the earbuds, Start.
+  Expected: blocked, with "None of the selected devices are connected, so there is nothing to record." Click **Reset to defaults** afterwards.
+- [ ] Remove all inputs (minus buttons), Start.
+  Expected: blocked with "Add at least one audio input." Then click **Add input** repeatedly until a row shows "Select…" (all connected devices used), Start: blocked with "Input N has no device selected." Click **Reset to defaults** afterwards.
+- [ ] Pick the same device in two rows, Start.
+  Expected: blocked, naming the device that would be recorded twice. Click **Reset to defaults** afterwards.
+- [ ] Settings (gear icon) > ffmpeg path override = `/nonexistent/ffmpeg`, Done, Start.
+  Expected: error says ffmpeg was not found and how to install it. Clear the override in Settings; "Using ffmpeg at /opt/homebrew/bin/ffmpeg" reappears.
 
 ## 3. Parity with record-meeting.sh
 
@@ -64,52 +68,78 @@ Tick a box only when the expected result was observed; note failures next to the
 
 ## 5. Transcription
 
-Prerequisite: a voiceprint exists at `~/.cache/diarize/voiceprint-<name>.npy` (`<name>` = interviewer name in Settings; `ls ~/.cache/diarize/`). Use a real recording with a clear interviewer/guest exchange (at least a few minutes), ideally one recorded in section 1.
+Prerequisite: a voiceprint exists at `~/.cache/diarize/voiceprint-<name>.npy` (`<name>` = *Interviewer name* in Settings; `ls ~/.cache/diarize/`). Use a real recording with a clear interviewer/guest exchange (at least a few minutes), ideally one recorded in section 1.
 
-- [ ] Open the saved recording in the app, enter a guest name (e.g. `TestGuest`), click Transcribe.
-  Expected: progress appears with stage names changing over time (convert, transcribe, diarize, ...); the Transcribe button is disabled or turns into Cancel. First run only: models download and it takes noticeably longer.
+The **Transcription** section sits at the bottom of the main window. Its first line names the file it is about, as `<recording folder>/<file>`.
+
+- [ ] Record about 20 s with auto-transcribe off, stop.
+  Expected: after "Saved" the Transcription section shows `<timestamp folder>/meeting.flac`, a guest-name field whose placeholder is the default guest name ("Guest"), and a **Transcribe** button. Nothing starts by itself.
+- [ ] Enter a guest name (e.g. `TestGuest`) in the field and click **Transcribe** (or press Return in the field).
+  Expected: the form is replaced by the running view: a stage title that changes over time ("Converting audio…", "Transcribing…", "Identifying speakers…"), an elapsed-time counter ticking each second, "Guest: TestGuest", and a **Cancel** button. During "Transcribing…" the bar is determinate with a percentage that rises; in the other stages it is indeterminate. First run only: "Setting up (first run only)…" with a note, and models download, so it takes noticeably longer.
 - [ ] Wait for completion.
-  Expected: a summary appears with: number of turns, duration, speaking time per speaker (Interviewer / Interviewee, adding up to roughly the duration), the identification method, and the voiceprint scores. Time taken is roughly 1-2 min per 10 min of audio.
+  Expected: a green "Transcript ready: TestGuest_Transcript.md" line and a table with: Turns, Duration, Speaking time (one line per person, "Joao (Interviewer): x.x min" and "TestGuest (Interviewee): y.y min", adding up to roughly the duration), Identified by ("saved voiceprint (Joao 0.9x, TestGuest 0.xx)"), Uncertain turns (?), and Took (roughly 1-2 min per 10 min of audio). Buttons: **Open transcript**, **Show in Finder**, **Transcribe again…**.
 - [ ] Check the scores.
-  Expected: interviewer cluster scores about 0.9+ and the other cluster well under 0.5. No weak-match warning for a good recording.
+  Expected: the interviewer's score about 0.9+ and the guest's well under 0.5. No orange "Weak voice match" warning for a good recording.
 - [ ] Check the `(?)` count against the file: `grep -c '(?)' <Guest>_Transcript.md`.
-  Expected: the number matches the summary (low for a clean recording).
+  Expected: the number matches "Uncertain turns (?)" (low for a clean recording).
 - [ ] Files next to the recording: `ls "$(dirname "$(ls -t ~/Documents/Recordings/meetings/*/meeting.flac | head -1)")"`
   Expected: `TestGuest_Transcript.md` and `TestGuest_Transcript.summary.json` sit beside `meeting.flac` (not in `~/Recordings` or elsewhere). The JSON has turns, duration, speaking seconds per label, identification, weak-match flag.
-- [ ] Click Open transcript, and Show in Finder.
-  Expected: the transcript opens in the default app; Finder highlights the recording folder or transcript.
+- [ ] Click **Open transcript**, then **Show in Finder**.
+  Expected: the transcript opens in the default app; Finder opens with the transcript selected.
 - [ ] Read the first ~10 turns and the last 3-4 in the transcript.
   Expected: the interviewer opens, asks the questions and closes; the guest answers. Labels read `<Interviewer> (Interviewer)` and `TestGuest (Interviewee)`, with timestamps. Wrong labels, missing turns, or text out of order are failures. Known quirks that are not failures: words at a speaker change landing in the neighbouring turn, misheard short phrases, misspelled proper names.
+- [ ] Click **Transcribe again…**.
+  Expected: back to the guest-name field for the same file; typing `TestGuest` again shows an orange "TestGuest_Transcript.md already exists in this folder and will be replaced." note.
 - [ ] Weak match: transcribe a recording where the interviewer's voice is absent or very quiet (e.g. only the BlackHole input has speech, or a recording of two other people).
-  Expected: a weak-match warning is shown in the summary and a low score; some turns may be marked `(?)`.
-- [ ] Two recordings, same guest name: transcribe a second, different recording with the same guest name.
-  Expected: the second transcript is for the second recording (different content/timestamps), not a stale copy of the first.
-- [ ] Auto-transcribe: enable it in Settings, record 20-30 s, stop.
-  Expected: transcription starts on its own after Saved, using the default guest name when none was entered. Disable it again afterwards.
+  Expected: an orange "Weak voice match — check the labels by reading the first turns" warning in the summary and a low score; some turns may be marked `(?)`.
+- [ ] Two recordings, same guest name, separate folders: transcribe a second, different recording with the same guest name.
+  Expected: the second transcript is for the second recording (different content/timestamps), not a stale copy of the first, and it is written in the second recording's folder.
+- [ ] **Transcribe a file…**: click it (top right of the section), pick an older `.flac` (or a `.wav`/`.m4a`/`.mp3`), enter a guest name, **Transcribe**.
+  Expected: the file picker offers only audio files; the section switches to the chosen file's `<folder>/<name>`; the transcript is written in that file's folder. The button is disabled while a transcription runs.
+- [ ] Auto-transcribe: enable *Transcribe automatically after recording* in Settings, record 20-30 s, stop.
+  Expected: transcription starts on its own after "Saved" (running view straight away), using the default guest name ("Guest_Transcript.md"). Disable it again afterwards.
+
+### Recording while transcribing
+
+- [ ] Start a transcription of a longer recording (5+ minutes), then Start Recording and record 20-30 s while it runs (also try this with auto-transcribe on).
+  Expected: recording is unaffected (meters live, no dropouts when played back; note any). The Transcription section keeps showing the running file and its progress. When the new recording is saved, a "New recording saved: <folder>/meeting.flac" line with **Transcribe…** (disabled until the run ends) appears below it; it does not replace the running view. With auto-transcribe on, the new recording starts right after the first run finishes successfully.
+- [ ] After the first run has finished, click **Transcribe…** on that line (auto-transcribe off).
+  Expected: the section switches to the new file with the guest-name field, and an "Earlier: TestGuest_Transcript.md (<folder>/meeting.flac)" line with **Open** and **Show** remains below (with "— weak voice match" and an orange icon if that run was weak).
 
 ### Cancel
 
-- [ ] Start a transcription of a longer recording (5+ minutes), and click Cancel during the transcribe stage.
-  Expected: it stops within a few seconds, status shows cancelled (not an error), no transcript/summary file is left half-written, and `pgrep -fl "mlx_whisper|diarize|run.sh"` shows no leftover processes. The Transcribe button works again, and a re-run completes.
+- [ ] Start a transcription of a longer recording (5+ minutes), and click **Cancel** during the transcribe stage.
+  Expected: the button reads "Cancelling…" and is disabled; within a few seconds the section shows "Transcription cancelled." (not an error), no transcript/summary file is left half-written, and `pgrep -fl "mlx_whisper|diarize|run.sh"` shows no leftover processes. **Transcribe again** works, and a re-run completes.
+- [ ] Start a transcription, then Cmd-Q.
+  Expected: an alert "A transcription is in progress. Cancel it and quit?"; **Don't Quit** keeps everything running. **Cancel Transcription & Quit** quits within about 6 seconds and `pgrep -fl "mlx_whisper|diarize|run.sh"` shows nothing afterwards.
+- [ ] Start a recording with auto-transcribe on and a transcription running, then Cmd-Q and confirm.
+  Expected: one combined alert; the recording is stopped and saved (file plays), the transcription is cancelled, no new transcription starts for the saved file, and the app quits within about 12 seconds.
 
 ### Failure path
 
 - [ ] `mv ~/.cache/diarize/voiceprint-<name>.npy ~/.cache/diarize/voiceprint-<name>.npy.bak`, then Transcribe a recording.
-  Expected: it fails with a clear error mentioning the missing voiceprint (and that the interview-transcribe skill creates it), not a hang or a raw stack trace alone. No transcript file is produced.
-- [ ] **Rename it back:** `mv ~/.cache/diarize/voiceprint-<name>.npy.bak ~/.cache/diarize/voiceprint-<name>.npy`, then confirm with `ls ~/.cache/diarize/voiceprint-*`.
-  Expected: the file is back under its original name. Transcribe again to confirm it works.
+  Expected: a red error mentioning the missing voiceprint (and that passing 2+ recordings builds it), a collapsed "Pipeline output" disclosure with the last lines of the log, and a **Retry** button next to the guest-name field; not a hang or a raw stack trace alone. No transcript file is produced.
+- [ ] **Rename it back:** `mv ~/.cache/diarize/voiceprint-<name>.npy.bak ~/.cache/diarize/voiceprint-<name>.npy`, then confirm with `ls ~/.cache/diarize/voiceprint-*`, and click **Retry**.
+  Expected: the file is back under its original name and the transcription completes.
 - [ ] Launch the app from Finder or `open build/MeetingRecorder.app` (not `swift run`) and Transcribe a recording.
   Expected: works without relying on your shell PATH (the app adds `/opt/homebrew/bin`), so `uv` and `ffmpeg` are found.
+
+### Settings: transcription group
+
+- [ ] Open Settings (gear icon). In the Transcription group change *Interviewer name*, *Default guest name* and the auto-transcribe toggle, click Done, quit and relaunch.
+  Expected: the values persisted. The guest-name placeholder shows the new default guest name. (Restore the interviewer name before the next transcription: it selects the voiceprint file.)
+- [ ] Pipeline folder: click **Choose…** and pick a folder without `run.sh` (e.g. `~/Documents`).
+  Expected: an orange "No run.sh in the chosen pipeline folder." and "Using pipeline at ..." still names the bundled copy. Pick a folder with `run.sh` (e.g. the repo's `Pipeline/`): "Using pipeline at <that folder>". **Clear** goes back to the bundled copy.
 
 ## 6. Settings migration
 
 - [ ] Before installing the new build, keep a copy of the old app's preferences (`defaults export <bundle id> ~/old-settings.plist`), or use a machine/profile that last ran the old version with a remote device and a mic set (e.g. remote `BlackHole 2ch` volume 0.7, mic `MacBook Air Microphone` volume 0.9). Launch the new build.
-  Expected: Settings shows two inputs, remote first then mic, with those device names and volumes; format and other old settings (output folder, ffmpeg path) are unchanged.
+  Expected: the Audio Inputs list shows two inputs, remote first then mic, with those device names and gains; format and other old settings (output folder, ffmpeg path in Settings) are unchanged.
 - [ ] Start and stop a short recording with the migrated settings.
   Expected: two meters, Saved, file plays.
 - [ ] Corrupt one field only (e.g. set a bad value for the format key in the plist), relaunch.
   Expected: only that field falls back to its default; the inputs and other settings are kept (not a full reset).
-- [ ] Reset the inputs to defaults (or delete the settings) and relaunch.
+- [ ] Click **Reset to defaults** under the Audio Inputs list (or delete the settings) and relaunch.
   Expected: the three default inputs return.
 
 ## 7. Wrap-up
