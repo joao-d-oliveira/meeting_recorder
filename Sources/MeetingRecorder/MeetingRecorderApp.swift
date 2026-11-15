@@ -9,8 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stateObserver: AnyCancellable?
     private var quitTimeout: DispatchWorkItem?
 
-    // Closing the window quits, so it goes through the same confirmation as Cmd-Q
-    // instead of leaving a windowless recording running.
+    // Closing the window quits, so it goes through the same confirmation as Cmd-Q. While a
+    // recording runs the window cannot be closed at all (`WindowCloseLock`), so declining
+    // the confirmation never leaves a windowless app that is still recording. A running
+    // transcription does not lock the window; see `restoreWindowIfNeeded`.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -21,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .recording = model.controller.state { recordingInProgress = true }
         if recordingInProgress || model.isTranscribing {
             guard confirmQuit(recording: recordingInProgress, transcribing: model.isTranscribing) else {
+                restoreWindowIfNeeded()
                 return .terminateCancel
             }
         }
@@ -39,6 +42,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ffmpeg is SIGKILLed at 10 s; the pipeline gets SIGINT, then SIGKILL after 4 s.
         waitForStopThenReply(timeout: recordingStopping ? 12 : 6)
         return .terminateLater
+    }
+
+    /// Declining the quit that closing the window started (a transcription is running) leaves
+    /// the app without a window. Brings one back: an existing one if AppKit kept it, otherwise
+    /// a new one through the File > New Window action of the WindowGroup. Best effort; the Dock
+    /// icon reopens the window as well. Does nothing if a window is there (Cmd-Q, Dock > Quit).
+    private func restoreWindowIfNeeded() {
+        DispatchQueue.main.async {
+            let candidates = NSApp.windows.filter { $0.canBecomeMain }
+            if candidates.contains(where: { $0.isVisible || $0.isMiniaturized }) { return }
+            if let existing = candidates.first {
+                existing.makeKeyAndOrderFront(nil)
+            } else {
+                NSApp.sendAction(#selector(NSResponder.newWindowForTab(_:)), to: nil, from: nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     private func confirmQuit(recording: Bool, transcribing: Bool) -> Bool {

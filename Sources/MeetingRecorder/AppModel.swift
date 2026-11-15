@@ -90,6 +90,14 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    /// The window must not be closed: it would leave a windowless app with a live recording
+    /// (closing quits, and the quit confirmation can be declined). Only `.recording`: once the
+    /// recording is stopping, closing the window is a quit that waits for ffmpeg to finish.
+    var isCloseLocked: Bool {
+        if case .recording = controller.state { return true }
+        return false
+    }
+
     var isTranscribing: Bool {
         if case .running = transcription.state { return true }
         return false

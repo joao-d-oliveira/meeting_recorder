@@ -26,6 +26,7 @@ struct ContentView: View {
             SettingsSheet()
                 .environmentObject(model)
         }
+        .background(WindowCloseLock(isLocked: model.isCloseLocked))
     }
 
     /// Height the inputs list may take before it scrolls. Everything else in the window
