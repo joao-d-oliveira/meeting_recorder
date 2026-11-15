@@ -216,8 +216,7 @@ func runCommandBuilderTests() {
 
     test("default inputs yield the same graph as the installed record-meeting.sh") {
         guard let live = filterGraphFromRecordMeetingScript() else {
-            print("  (skipped: record-meeting.sh not found on this machine)")
-            return
+            throw TestSkip(reason: "record-meeting.sh not found on this machine")
         }
         try expect(!live.contains("$"), "unsubstituted variable in script graph: \(live)")
         let defaults = InputConfig.defaultInputs.map(\.gain)
@@ -248,36 +247,44 @@ private func runProcess(_ path: String, _ arguments: [String]) throws -> (status
     return (process.terminationStatus, String(decoding: data, as: UTF8.self))
 }
 
+/// The app's own ffmpeg arguments with only the avfoundation inputs swapped for synthetic
+/// `sine` sources (one per entry of `frequencies`, paired with `gains`) and a flac output.
+/// No audio hardware is touched.
+private func lavfiGraphArguments(gains: [Double], frequencies: [Int], output: URL) -> [String] {
+    let inputs = gains.enumerated().map { ResolvedInput(deviceIndex: $0.offset, gain: $0.element) }
+    let appArguments = CommandBuilder.arguments(
+        inputs: inputs, settings: RecordingSettings(), outputURL: output)
+    var arguments = ["-hide_banner", "-nostats"]
+    for frequency in frequencies {
+        arguments += ["-f", "lavfi", "-i", "sine=frequency=\(frequency):duration=2"]
+    }
+    arguments += [
+        "-filter_complex", filterComplex(of: appArguments),
+        "-map", "[mixed]", "-c:a", "flac", "-y", output.path,
+    ]
+    return arguments
+}
+
+private let ffmpegMissingReason = "ffmpeg not found (FFmpegLocator checked Homebrew paths and PATH); "
+    + "install it with: brew install ffmpeg"
+
 /// Runs the real ffmpeg on the graph the app generates, with synthetic `sine` sources
-/// standing in for the avfoundation inputs. No audio hardware is touched.
+/// standing in for the avfoundation inputs. No audio hardware is touched. Without an
+/// ffmpeg on this machine the tests report SKIP rather than passing silently.
 func runFFmpegGraphValidationTests() {
-    let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+    let ffmpeg = FFmpegLocator().locate()
     let allGains = [0.55, 0.55, 1.0]
 
     for count in 1...3 {
         test("real ffmpeg accepts the \(count)-input graph and meters every input") {
-            guard FileManager.default.isExecutableFile(atPath: ffmpeg) else {
-                print("  (skipped: \(ffmpeg) not found)")
-                return
-            }
-            let inputs = allGains.prefix(count).enumerated().map {
-                ResolvedInput(deviceIndex: $0.offset, gain: $0.element)
-            }
+            guard let ffmpeg else { throw TestSkip(reason: ffmpegMissingReason) }
             let output = FileManager.default.temporaryDirectory
                 .appendingPathComponent("graph-check-\(UUID().uuidString).flac")
             defer { try? FileManager.default.removeItem(at: output) }
 
-            // The app's own arguments: only the avfoundation inputs are replaced.
-            let appArguments = CommandBuilder.arguments(
-                inputs: inputs, settings: RecordingSettings(), outputURL: output)
-            var arguments = ["-hide_banner", "-nostats"]
-            for index in 0..<count {
-                arguments += ["-f", "lavfi", "-i", "sine=frequency=\(220 * (index + 1)):duration=2"]
-            }
-            arguments += [
-                "-filter_complex", filterComplex(of: appArguments),
-                "-map", "[mixed]", "-c:a", "flac", "-y", output.path,
-            ]
+            let arguments = lavfiGraphArguments(
+                gains: Array(allGains.prefix(count)),
+                frequencies: (0..<count).map { 220 * ($0 + 1) }, output: output)
 
             let result = try runProcess(ffmpeg, arguments)
             try expectEqual(result.status, 0)
@@ -293,6 +300,52 @@ func runFFmpegGraphValidationTests() {
             let parser = LevelLineParser(inputCount: count)
             let seen = Set(result.stderr.split(separator: "\n").compactMap { parser.parse(line: String($0))?.inputIndex })
             try expectEqual(seen, Set(0..<count))
+        }
+    }
+
+    // Identical sources, different gains: the only thing telling the meters apart is which
+    // input each Parsed_ametadata id really belongs to. Ids are read raw from ffmpeg's output
+    // (not through LevelLineParser) so the advertised numbering is checked against ffmpeg's.
+    let levelRegex = try! NSRegularExpression(
+        pattern: #"\[Parsed_ametadata_(\d+) @ [^\]]+\] lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+)"#)
+    for gains in [[0.10, 0.50, 1.00], [1.00, 0.10, 0.50]] {
+        test("meter ids follow their own input: gains \(gains) on identical sources order the levels") {
+            guard let ffmpeg else { throw TestSkip(reason: ffmpegMissingReason) }
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("graph-gain-\(UUID().uuidString).flac")
+            defer { try? FileManager.default.removeItem(at: output) }
+
+            let result = try runProcess(ffmpeg, lavfiGraphArguments(
+                gains: gains, frequencies: [440, 440, 440], output: output))
+            try expectEqual(result.status, 0)
+
+            var sums: [Int: Double] = [:]
+            var counts: [Int: Int] = [:]
+            for line in result.stderr.split(separator: "\n").map(String.init) {
+                let range = NSRange(line.startIndex..., in: line)
+                guard let match = levelRegex.firstMatch(in: line, range: range),
+                      let idRange = Range(match.range(at: 1), in: line),
+                      let valueRange = Range(match.range(at: 2), in: line),
+                      let id = Int(line[idRange]), let value = Double(line[valueRange]) else { continue }
+                sums[id, default: 0] += value
+                counts[id, default: 0] += 1
+            }
+            let ids = gains.indices.map { CommandBuilder.ametadataInstanceID(forInput: $0) }
+            try expectEqual(Set(sums.keys), Set(ids))
+            let averages = ids.map { sums[$0]! / Double(counts[$0]!) }
+
+            // Loudest input last: ordering by measured level must equal ordering by gain.
+            let byLevel = gains.indices.sorted { averages[$0] < averages[$1] }
+            let byGain = gains.indices.sorted { gains[$0] < gains[$1] }
+            try expectEqual(byLevel, byGain)
+
+            // And the gaps match the gains (20*log10 ratio), so it is not a coincidence of order.
+            for index in gains.indices {
+                let expectedGap = 20 * log10(gains[index] / gains[0])
+                try expect(abs((averages[index] - averages[0]) - expectedGap) < 1.0,
+                           "input \(index) averages \(averages[index]) dB vs input 0 \(averages[0]) dB, "
+                               + "expected a gap of \(expectedGap) dB")
+            }
         }
     }
 }
