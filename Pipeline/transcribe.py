@@ -1,6 +1,10 @@
 """Transcribe a 16 kHz WAV with mlx-whisper, keeping word timestamps.
 
-Usage: python transcribe.py input.wav output.json
+Usage: python transcribe.py input.wav output.json [part.json]
+
+The JSON is written to part.json (default: output.json + ".part") and renamed to output.json
+when complete, so a run that is killed never leaves a truncated output.json. run.sh passes a
+part name of its own so that concurrent runs on the same recording don't share one.
 
 While transcribing, prints `PROGRESS: <0-100>` lines on stdout whenever the integer
 percentage changes. They are printed when stdout is not a terminal (or when
@@ -60,6 +64,7 @@ def main():
     import mlx_whisper  # imported before the hook so mlx_whisper.transcribe is loaded
 
     src, dst = sys.argv[1], sys.argv[2]
+    tmp = sys.argv[3] if len(sys.argv) > 3 else dst + ".part"
     install_progress_hook()
     result = mlx_whisper.transcribe(
         src,
@@ -71,7 +76,6 @@ def main():
     )
     # Write to a temp file and rename, so an interrupted run never leaves a truncated
     # JSON that a later run would take for a finished transcription.
-    tmp = dst + ".part"
     with open(tmp, "w") as f:
         json.dump(result, f)
     os.replace(tmp, dst)

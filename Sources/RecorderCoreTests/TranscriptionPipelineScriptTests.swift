@@ -257,8 +257,59 @@ private func processID(in file: URL) -> pid_t? {
 // MARK: - Tests
 
 func runPipelineRobustnessTests() {
+    runCancelTests()
     runSetupTests()
     runEnvironmentTests()
+    runOverlappingRunTests()
+    runCacheContentsTests()
+}
+
+private func runCancelTests() {
+    test("cancel while ffmpeg is writing: exits 130 promptly, its part file and the process are gone") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let script = try ScriptRun(
+            sandbox, [sandbox.out.path, "Dana:\(audio.path)"], environment: ["STUB_FFMPEG_HANG": "1"])
+        let ffmpegPID = sandbox.state.appendingPathComponent("ffmpeg.pid")
+        try expect(waitOnMain(timeout: 15) { !sandbox.parts.isEmpty && processID(in: ffmpegPID) != nil },
+                   "ffmpeg never started writing: \(script.stdout) \(script.stderr)")
+        let part = sandbox.parts[0]
+        try expect(part.contains(".wav.") && part.hasSuffix(".part"), "unexpected part name \(part)")
+        guard let ffmpeg = processID(in: ffmpegPID) else { throw TestFailure(description: "no ffmpeg pid") }
+
+        let cancelledAt = Date()
+        script.process.interrupt()
+        try expect(script.wait(timeout: 10), "run.sh did not exit after SIGINT")
+        try expect(Date().timeIntervalSince(cancelledAt) < 2, "cancelling took too long")
+        try expectEqual(script.status, 130)
+        try expect(waitOnMain(timeout: 5) { !processIsAlive(ffmpeg) }, "ffmpeg \(ffmpeg) survived the cancel")
+        try expectEqual(sandbox.parts, [])
+        try expectEqual(sandbox.sharedWavs, [])
+        try expectEqual(sandbox.useLinks, [])
+    }
+
+    test("cancel while transcribing: the JSON part file is removed, nothing is cached as a transcription") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let script = try ScriptRun(
+            sandbox, [sandbox.out.path, "Dana:\(audio.path)"], environment: ["STUB_TRANSCRIBE_HANG": "1"])
+        let transcribePID = sandbox.state.appendingPathComponent("transcribe.pid")
+        try expect(waitOnMain(timeout: 15) { processID(in: transcribePID) != nil },
+                   "transcribe never started: \(script.stdout) \(script.stderr)")
+        try expect(sandbox.parts.contains { $0.contains(".json.") && $0.hasSuffix(".part") },
+                   "no JSON part file during the run: \(sandbox.parts)")
+        guard let python = processID(in: transcribePID) else { throw TestFailure(description: "no transcribe pid") }
+
+        script.process.interrupt()
+        try expect(script.wait(timeout: 10), "run.sh did not exit after SIGINT")
+        try expectEqual(script.status, 130)
+        try expect(waitOnMain(timeout: 5) { !processIsAlive(python) }, "transcribe \(python) survived the cancel")
+        try expectEqual(sandbox.parts, [])
+        try expectEqual(sandbox.cachedJSON, [])
+        try expectEqual(sandbox.useLinks, [])
+        // The finished conversion is kept, so a retry doesn't redo it.
+        try expectEqual(sandbox.sharedWavs.count, 1)
+    }
 }
 
 private func runSetupTests() {
@@ -373,5 +424,153 @@ private func runEnvironmentTests() {
             let again = try run(sandbox, [sandbox.out.path, "Dana:\(audio.path)"])
             try expect(!again.stages.contains("STAGE: setup"))
         }
+    }
+}
+
+private func runOverlappingRunTests() {
+    test("two runs on the same recording at the same time both succeed and never share a temporary file") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let slow = ["STUB_FFMPEG_SLEEP": "1.2", "STUB_TRANSCRIBE_SLEEP": "1.2", "STUB_DIARIZE_SLEEP": "0.3"]
+        let outA = sandbox.root.appendingPathComponent("out-a"), outB = sandbox.root.appendingPathComponent("out-b")
+        let a = try ScriptRun(sandbox, [outA.path, "Dana:\(audio.path)"], environment: slow)
+        try expect(waitOnMain(timeout: 10) { !sandbox.log("ffmpeg.log").isEmpty }, "first run never converted")
+        let b = try ScriptRun(sandbox, [outB.path, "Dana:\(audio.path)"], environment: slow)
+        try expect(a.wait(), "run A did not finish")
+        try expect(b.wait(), "run B did not finish")
+        try expectEqual(a.status, 0)
+        try expectEqual(b.status, 0)
+        try expect(a.stderr.isEmpty && b.stderr.isEmpty, "\(a.stderr) \(b.stderr)")
+        for out in [outA, outB] {
+            try expect(FileManager.default.fileExists(atPath: out.appendingPathComponent("Dana_Transcript.md").path))
+        }
+
+        // They really overlapped: both converted and both transcribed, each into its own part file.
+        let ffmpegOutputs = sandbox.log("ffmpeg.log")
+        try expectEqual(ffmpegOutputs.count, 2)
+        try expectEqual(Set(ffmpegOutputs).count, 2)
+        let transcribeParts = sandbox.log("transcribe.parts")
+        try expectEqual(transcribeParts.count, 2)
+        try expectEqual(Set(transcribeParts).count, 2)
+        // Each conversion is complete and from one process: "<pid> begin" then "<pid> end".
+        let contents = sandbox.log("diarize.wav-content")
+        try expectEqual(contents.count, 4)
+        for pair in stride(from: 0, to: contents.count, by: 2) {
+            let begin = contents[pair].split(separator: " "), end = contents[pair + 1].split(separator: " ")
+            try expect(begin.count == 2 && end.count == 2 && begin[0] == end[0] && begin[1] == "begin" && end[1] == "end",
+                       "mixed-up WAV content: \(contents)")
+        }
+        try expectEqual(sandbox.parts, [])
+        try expectEqual(sandbox.useLinks, [])
+        try expectEqual(sandbox.cachedJSON.count, 1)
+    }
+
+    test("a run that finishes first and deletes the cached WAV does not take it from one still diarizing") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let outA = sandbox.root.appendingPathComponent("out-a"), outB = sandbox.root.appendingPathComponent("out-b")
+        let slow = try ScriptRun(sandbox, [outB.path, "Dana:\(audio.path)"], environment: ["STUB_DIARIZE_SLEEP": "2"])
+        try expect(waitOnMain(timeout: 15) { sandbox.stateFileExists("diarize.started") }, "slow run never reached diarize")
+
+        let quick = try run(sandbox, [outA.path, "Dana:\(audio.path)"])
+        try expectEqual(quick.status, 0)
+        try expect(quick.stdout.contains("Using cached 16 kHz conversion"), "second run should have used the cache: \(quick.stdout)")
+        try expectEqual(sandbox.sharedWavs, [])  // the quick run cleaned up the cached WAV...
+        try expect(!slow.done, "the slow run should still be diarizing")
+
+        try expect(slow.wait(), "slow run did not finish")
+        // ...and the slow run, which reads its WAV after that, still found it.
+        try expectEqual(slow.status, 0)
+        try expect(slow.stderr.isEmpty, "\(slow.stderr)")
+        try expect(FileManager.default.fileExists(atPath: outB.appendingPathComponent("Dana_Transcript.md").path))
+        let wavs = sandbox.log("diarize.wavs")
+        try expectEqual(wavs.count, 2)
+        try expect(wavs.allSatisfy { $0.hasSuffix(".use.wav") }, "diarize should get a run-private name: \(wavs)")
+        try expectEqual(Set(wavs).count, 2)
+        try expectEqual(sandbox.useLinks, [])
+    }
+}
+
+private func runCacheContentsTests() {
+    test("the cached WAV is deleted after a successful run, the JSON stays, and a re-run reconverts but skips Whisper") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let args = [sandbox.out.path, "Dana:\(audio.path)"]
+        let first = try run(sandbox, args)
+        try expectEqual(first.status, 0)
+        try expectEqual(first.stages, ["STAGE: convert", "STAGE: transcribe", "STAGE: diarize", "STAGE: done"])
+        try expectEqual(sandbox.sharedWavs, [])
+        try expectEqual(sandbox.useLinks, [])
+        try expectEqual(sandbox.parts, [])
+        try expectEqual(sandbox.cachedJSON.count, 1)
+        try expectEqual(sandbox.log("ffmpeg.log").count, 1)
+        // Whisper's part file is a name of its own, not the shared `<json>.part`.
+        let part = sandbox.log("transcribe.parts")
+        try expectEqual(part.count, 1)
+        try expect(part[0].contains(".json.") && part[0].hasSuffix(".part") && part[0] != sandbox.cache.path + "/" + sandbox.cachedJSON[0] + ".part", part[0])
+
+        let second = try run(sandbox, args)
+        try expectEqual(second.status, 0)
+        try expectEqual(second.stages, ["STAGE: convert", "STAGE: transcribe", "STAGE: diarize", "STAGE: done"])
+        try expect(second.stdout.contains("Converting \(audio.path) -> 16 kHz mono"), "\(second.stdout)")
+        try expect(second.stdout.contains("Using cached transcription"), "\(second.stdout)")
+        try expectEqual(sandbox.log("ffmpeg.log").count, 2)
+        try expectEqual(sandbox.log("transcribe.parts").count, 1)  // Whisper did not run again
+        try expectEqual(sandbox.sharedWavs, [])
+        try expect(FileManager.default.fileExists(atPath: sandbox.out.appendingPathComponent("Dana_Transcript.md").path))
+    }
+
+    test("when diarization fails the WAV and JSON are kept, and the retry reuses both") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let args = [sandbox.out.path, "Dana:\(audio.path)"]
+        let failed = try run(sandbox, args, environment: ["STUB_DIARIZE_FAIL": "1"])
+        try expect(failed.status != 0)
+        try expectEqual(sandbox.sharedWavs.count, 1)
+        try expectEqual(sandbox.cachedJSON.count, 1)
+        try expectEqual(sandbox.useLinks, [])
+        try expectEqual(sandbox.parts, [])
+
+        let retry = try run(sandbox, args)
+        try expectEqual(retry.status, 0)
+        try expect(retry.stdout.contains("Using cached 16 kHz conversion"), "\(retry.stdout)")
+        try expect(retry.stdout.contains("Using cached transcription"), "\(retry.stdout)")
+        try expectEqual(sandbox.log("ffmpeg.log").count, 1)
+        try expectEqual(sandbox.log("transcribe.parts").count, 1)
+        try expectEqual(sandbox.sharedWavs, [])
+    }
+
+    test("with two recordings every WAV is deleted after the run") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let first = sandbox.audio("a", content: "one"), second = sandbox.audio("b", content: "two")
+        let result = try run(sandbox, [sandbox.out.path, "Dana:\(first.path)", "Eve:\(second.path)"])
+        try expectEqual(result.status, 0)
+        try expectEqual(sandbox.log("diarize.wavs").count, 2)
+        try expectEqual(sandbox.sharedWavs, [])
+        try expectEqual(sandbox.useLinks, [])
+        try expectEqual(sandbox.cachedJSON.count, 2)
+    }
+
+    test("temporary files left by a killed run are swept after a day, live ones and real cache entries are not") {
+        let sandbox = Sandbox(); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let old = Date(timeIntervalSinceNow: -3 * 24 * 3600)
+        func plant(_ name: String, modified: Date) {
+            let url = sandbox.cache.appendingPathComponent(name)
+            sandbox.touch(url)
+            try! FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        }
+        for name in ["k-aaaa.wav.111.part", "k-aaaa.json.111.part", "k-aaaa.111.use.wav", "k-aaaa.wav.part"] {
+            plant(name, modified: old)
+        }
+        plant("k-bbbb.wav.222.part", modified: Date())          // a run that is still going
+        plant("k-cccc.wav", modified: old)                      // cache entries are not temporary
+        plant("k-cccc.json", modified: old)
+        let result = try run(sandbox, [sandbox.out.path, "Dana:\(audio.path)"])
+        try expectEqual(result.status, 0)
+        try expectEqual(
+            sandbox.cacheFiles { $0.hasPrefix("k-") },
+            ["k-bbbb.wav.222.part", "k-cccc.json", "k-cccc.wav"])
+        try expect(FileManager.default.fileExists(atPath: sandbox.cache.appendingPathComponent("voiceprint-joao.npy").path))
     }
 }

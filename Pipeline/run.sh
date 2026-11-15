@@ -9,8 +9,10 @@
 #   INTERVIEWER=Joao          name used for the interviewer's turns (default Joao)
 #   REFRESH_VOICEPRINT=1      rebuild the interviewer voiceprint (needs 2+ recordings)
 #
-# Each recording is converted to 16 kHz mono and transcribed once; the WAV and
-# whisper JSON are cached in ~/.cache/diarize so re-runs only redo diarization.
+# Each recording is converted to 16 kHz mono and transcribed once; the whisper JSON is
+# cached in ~/.cache/diarize so re-runs skip Whisper. The 16 kHz WAV (~115 MB per hour of
+# audio) is cached only until the run that used it has diarized successfully, then deleted;
+# a later run converts the audio again (seconds) and reuses the JSON.
 # The cache key is unique per audio file (path + size + mtime), so recordings that
 # share a basename (the app writes <timestamped folder>/meeting.flac) never collide.
 # Writes OUT_DIR/<Guest>_Transcript.md and OUT_DIR/<Guest>_Transcript.summary.json.
@@ -52,7 +54,7 @@ if [ ! -t 2 ]; then export HF_HUB_DISABLE_PROGRESS_BARS=1; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$HOME/.cache/diarize"
 PY="$CACHE/.venv/bin/python"
-# setup.sh creates this as its last step; see environment_ready.
+# setup.sh creates this as its last step; see ensure_environment.
 READY="$CACHE/.venv/.ready"
 
 # Short hash of stdin, using whatever the system has (macOS ships shasum and md5).
@@ -107,15 +109,21 @@ if [ "$#" -lt 2 ]; then
   usage; exit 1
 fi
 
+
 # --- cancellation -----------------------------------------------------------
 # The app cancels by signalling this script. Foreground children would otherwise
-# keep running (bash waits for them), so each step runs in the background, and on
-# INT/TERM/HUP every running job is terminated before exiting. Partial cache files
-# are removed so they can't be mistaken for finished ones next time.
-PARTIAL=""
-cleanup_partial() {
-  if [ -n "$PARTIAL" ]; then rm -f "$PARTIAL"; fi
-  PARTIAL=""
+# keep running (bash waits for them), so each step, setup included, runs in the background,
+# and on INT/TERM/HUP every running job is terminated before exiting. The files this run is
+# still writing (or only holds for itself) are removed so they can't be mistaken for finished
+# cache entries next time. They carry this process's id, so a concurrent run on the same
+# recording never writes to, renames or deletes them.
+TEMP_FILES=()
+cleanup_temp() {
+  local f
+  if [ "${#TEMP_FILES[@]}" -gt 0 ]; then
+    for f in "${TEMP_FILES[@]}"; do rm -f "$f"; done
+  fi
+  TEMP_FILES=()
 }
 on_signal() {
   trap '' INT TERM HUP
@@ -131,12 +139,12 @@ on_signal() {
     tries=$((tries + 1))
     sleep 0.1
   done
-  cleanup_partial
+  cleanup_temp
   echo "Cancelled" >&2
   exit 130
 }
 trap on_signal INT TERM HUP
-trap cleanup_partial EXIT
+trap cleanup_temp EXIT
 
 run_step() {
   local rc=0 pid
@@ -152,7 +160,6 @@ INTERVIEWER="${INTERVIEWER:-Joao}"
 
 # Validate every spec before doing any slow work.
 for spec in "$@"; do parse_spec "$spec"; done
-
 # setup.sh creates $READY as its final step. bin/python exists as soon as `uv venv` has run,
 # long before the packages are installed, so it alone proves nothing: a cancelled or failed
 # install would otherwise look like a working environment and fail later with
@@ -183,8 +190,38 @@ if { [ ! -f "$VOICEPRINT" ] || [ -n "${REFRESH_VOICEPRINT:-}" ]; } && [ "$#" -lt
   die "No voiceprint at $VOICEPRINT and only one recording. Pass 2+ recordings that share the interviewer (this builds the voiceprint)."
 fi
 
+# Writes $2 (the cached WAV) from the audio $1 through a part file that is renamed into place
+# only when ffmpeg succeeds.
+convert_wav() {
+  local part="$2.$$.part"
+  TEMP_FILES+=("$part")
+  run_step ffmpeg -nostdin -hide_banner -loglevel error -y -i "$1" -ac 1 -ar 16000 -f wav "$part"
+  mv -f "$part" "$2"
+}
+
+# Sets $held to a hard link of the cached WAV $2 that only this run uses. A concurrent run on
+# the same recording deletes the cached WAV when it finishes; without its own link this run
+# could find the file gone between the cache check and diarize.py reading it. If the WAV has
+# just disappeared it is converted again; where hard links don't work the cached file is used.
+hold_wav() {
+  held="${2%.wav}.$$.use.wav"
+  TEMP_FILES+=("$held")
+  ln -f "$2" "$held" 2>/dev/null && return 0
+  if [ ! -f "$2" ]; then
+    convert_wav "$1" "$2"
+    ln -f "$2" "$held" 2>/dev/null && return 0
+  fi
+  held="$2"
+}
+
 mkdir -p "$CACHE" "$OUT"
+# Temporary files that a run could not remove itself (SIGKILL, power loss) would stay forever
+# under their per-process names. Nothing live is idle for a day.
+find "$CACHE" -maxdepth 1 -type f \( -name '*.part' -o -name '*.use.wav' \) -mmin +1440 \
+  -exec rm -f {} + 2>/dev/null || true
+
 specs=()
+wavs=()
 for spec in "$@"; do
   parse_spec "$spec"
   key="$(cache_key "$guest" "$audio")"
@@ -193,27 +230,29 @@ for spec in "$@"; do
   echo "STAGE: convert"
   if [ ! -f "$wav" ]; then
     echo "Converting $audio -> 16 kHz mono"
-    PARTIAL="$wav.part"
-    run_step ffmpeg -nostdin -hide_banner -loglevel error -y -i "$audio" -ac 1 -ar 16000 -f wav "$wav.part"
-    mv -f "$wav.part" "$wav"
-    PARTIAL=""
+    convert_wav "$audio" "$wav"
   else
     echo "Using cached 16 kHz conversion"
   fi
+  hold_wav "$audio" "$wav"
   echo "STAGE: transcribe"
   if [ ! -f "$json" ]; then
     echo "Transcribing $guest (whisper large-v3-turbo; roughly 1-2 min per 10 min of audio)"
-    PARTIAL="$json.part"
-    run_step "$PY" "$HERE/transcribe.py" "$wav" "$json"
-    PARTIAL=""
+    json_part="$json.$$.part"
+    TEMP_FILES+=("$json_part")
+    run_step "$PY" "$HERE/transcribe.py" "$held" "$json" "$json_part"
   else
     echo "Using cached transcription"
   fi
-  specs+=("$guest:$wav:$json")
+  wavs+=("$wav")
+  specs+=("$guest:$held:$json")
 done
 
 echo "STAGE: diarize"
 args=("$OUT" "${specs[@]}" --interviewer "$INTERVIEWER")
 [ -n "${REFRESH_VOICEPRINT:-}" ] && args+=(--refresh-voiceprint)
 run_step "$PY" "$HERE/diarize.py" "${args[@]}"
+# Diarization succeeded (otherwise set -e has stopped the script). The WAVs are the bulk of
+# the cache and only a retry after a failure needs them; the JSON stays, so a re-run skips Whisper.
+for w in "${wavs[@]}"; do rm -f "$w"; done
 echo "STAGE: done"

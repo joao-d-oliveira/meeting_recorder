@@ -5,9 +5,9 @@ Run with the pipeline's own interpreter (it has numpy/torch/speechbrain installe
     ~/.cache/diarize/.venv/bin/python -I Pipeline/tests/test_pipeline.py
 
 Covers: the summary.json writer, that the .md output is byte-identical to the original
-skill's diarize.py for the same input, and the transcribe.py progress hook. Uses fabricated
-data and a temp directory only; no model is loaded and nothing is written to the
-user's cache.
+skill's diarize.py for the same input, and the transcribe.py progress hook and part-file
+argument. Uses fabricated data and a temp directory only; no model is loaded and nothing is
+written to the user's cache.
 """
 import contextlib
 import importlib.util
@@ -33,7 +33,7 @@ def load(name, path):
     return mod
 
 
-def fabricated_recording():
+def fabricated_recording(guest="Fab"):
     """30 words, 3 turns: speaker 0, speaker 1, speaker 0. The middle turn is low-margin."""
     words, labels, margins = [], [], []
     t = 0.0
@@ -45,7 +45,7 @@ def fabricated_recording():
     cents = np.zeros((2, 8), dtype=np.float32)
     cents[0, 0] = 1.0
     cents[1, 1] = 1.0
-    return {"guest": "Fab", "words": words, "labels": labels, "margins": margins, "cents": cents}
+    return {"guest": guest, "words": words, "labels": labels, "margins": margins, "cents": cents}
 
 
 def run_main(module, out_dir, voiceprint_path, interviewer="Joao"):
@@ -179,6 +179,46 @@ class ProgressHookTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             transcribe.install_progress_hook()  # must not raise
         self.assertIn("progress hook unavailable", err.getvalue())
+
+
+class TranscribePartFileTests(unittest.TestCase):
+    """run.sh gives transcribe.py a part-file name of its own (concurrent runs on the same
+    recording must not share one); the default is output.json + '.part'."""
+
+    def run_transcribe(self, argv_tail):
+        transcribe = load("vendored_transcribe_part", PIPELINE / "transcribe.py")
+        transcribe.EMIT_PROGRESS = False
+        fake = types.ModuleType("mlx_whisper")
+        fake.transcribe = lambda *args, **kwargs: {"segments": [{"words": []}], "text": ""}
+        sys.modules["mlx_whisper"] = fake
+        replaced = []
+        real_replace = transcribe.os.replace
+        transcribe.os.replace = lambda src, dst: (replaced.append((src, dst)), real_replace(src, dst))
+        argv = sys.argv
+        sys.argv = ["transcribe.py", *argv_tail]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                transcribe.main()
+        finally:
+            sys.argv = argv
+            transcribe.os.replace = real_replace
+            del sys.modules["mlx_whisper"]
+        return replaced
+
+    def test_uses_the_given_part_file_and_renames_it_into_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst, part = Path(tmp) / "k.json", Path(tmp) / "k.json.123.part"
+            replaced = self.run_transcribe(["in.wav", str(dst), str(part)])
+            self.assertEqual(replaced, [(str(part), str(dst))])
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["k.json"])
+            self.assertEqual(json.loads(dst.read_text())["segments"], [{"words": []}])
+
+    def test_default_part_file_is_the_output_plus_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = Path(tmp) / "k.json"
+            replaced = self.run_transcribe(["in.wav", str(dst)])
+            self.assertEqual(replaced, [(str(dst) + ".part", str(dst))])
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["k.json"])
 
 
 if __name__ == "__main__":
