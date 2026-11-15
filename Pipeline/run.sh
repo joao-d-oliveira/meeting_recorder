@@ -37,7 +37,7 @@ die() { echo "$*" >&2; exit 1; }
 # searched (ffmpeg and uv live in Homebrew or ~/.local/bin; /usr/sbin has sysctl, which
 # Python's joblib calls and otherwise warns about with a long traceback) without reordering
 # whatever the caller already set.
-for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" /usr/sbin /sbin; do
+for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin /usr/sbin /sbin; do
   case ":$PATH:" in
     *":$d:"*) ;;
     *) PATH="$PATH:$d" ;;
@@ -107,10 +107,9 @@ fi
 
 # --- cancellation -----------------------------------------------------------
 # The app cancels by signalling this script. Foreground children would otherwise
-# keep running (bash waits for them), so run each step in the background, wait on
-# it, and forward the signal. Partial cache files are removed so they can't be
-# mistaken for finished ones next time.
-CHILD_PID=""
+# keep running (bash waits for them), so each step runs in the background, and on
+# INT/TERM/HUP every running job is terminated before exiting. Partial cache files
+# are removed so they can't be mistaken for finished ones next time.
 PARTIAL=""
 cleanup_partial() {
   if [ -n "$PARTIAL" ]; then rm -f "$PARTIAL"; fi
@@ -118,10 +117,18 @@ cleanup_partial() {
 }
 on_signal() {
   trap '' INT TERM HUP
-  if [ -n "$CHILD_PID" ]; then
-    kill -TERM "$CHILD_PID" 2>/dev/null || true
-    wait "$CHILD_PID" 2>/dev/null || true
-  fi
+  local pids tries=0
+  # `jobs -rp` rather than a saved PID: it also covers a signal that lands right after the
+  # fork. TERM is repeated because a child still between fork and exec swallows it.
+  while pids="$(jobs -rp)"; [ -n "$pids" ]; do
+    if [ "$tries" -lt 30 ]; then
+      kill -TERM $pids 2>/dev/null || true
+    else
+      kill -KILL $pids 2>/dev/null || true
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
   cleanup_partial
   echo "Cancelled" >&2
   exit 130
@@ -130,11 +137,10 @@ trap on_signal INT TERM HUP
 trap cleanup_partial EXIT
 
 run_step() {
-  local rc=0
+  local rc=0 pid
   "$@" &
-  CHILD_PID=$!
-  wait "$CHILD_PID" || rc=$?
-  CHILD_PID=""
+  pid=$!
+  wait "$pid" || rc=$?
   return "$rc"
 }
 # -----------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 set -euo pipefail
 : "${HOME:?HOME is not set}"
 # Apps launched from Finder get a minimal PATH; uv and ffmpeg live in Homebrew or ~/.local/bin.
-for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" /usr/sbin /sbin; do
+for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin /usr/sbin /sbin; do
   case ":$PATH:" in
     *":$d:"*) ;;
     *) PATH="$PATH:$d" ;;

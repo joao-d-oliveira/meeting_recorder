@@ -11,7 +11,7 @@ words, SpeechBrain ECAPA voiceprints for who said them.
 
 Vendored from `~/.claude/skills/interview-transcribe/scripts/` (`run.sh`, `setup.sh`,
 `transcribe.py`, `diarize.py`). The first commit of this folder is the unmodified copy, so
-`git diff 8b79092 -- Pipeline` shows every change below. It stays CLI-compatible with the skill:
+diffing the files against that commit shows every change below. It stays CLI-compatible with the skill:
 
     run.sh OUT_DIR Guest:/path/audio.flac [Guest2:/path/audio2.flac ...]
     env INTERVIEWER=Joao  REFRESH_VOICEPRINT=1
@@ -42,8 +42,8 @@ skill's (`tests/test_pipeline.py` checks this against the installed skill).
 - **Fails fast.** Audio missing, malformed `Guest:path` specs, a guest name with `/`, no
   `ffmpeg`, and "no voiceprint and only one recording" are all reported before the slow work
   starts (the skill found out about the voiceprint only after transcribing).
-- **Finder-safe environment.** No reliance on the shell profile. `/opt/homebrew/bin`,
-  `/usr/local/bin`, `~/.local/bin` (uv), `/usr/sbin` and `/sbin` are appended to `PATH` if
+- **Finder-safe environment.** No reliance on the shell profile. `~/.local/bin` (uv),
+  `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/sbin` and `/sbin` are appended to `PATH` if
   missing (`/usr/sbin` has `sysctl`, which joblib calls; without it every run prints a long
   traceback). `PYTHONUNBUFFERED=1` and `PYTHONUTF8=1` are set; huggingface progress bars are
   disabled when stderr is not a terminal.
