@@ -58,9 +58,11 @@ final class AppModel: ObservableObject {
     }
 
     func startRecording() {
+        // A double click (or a click while the first-run permission prompt is up) must not
+        // start twice; the controller ignores a second start, but the model would not.
+        guard !isRecording else { return }
         issues = []
         notices = []
-        refreshDevices()
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -74,6 +76,12 @@ final class AppModel: ObservableObject {
     }
 
     private func beginRecording(micAuthorized: Bool) {
+        // First run: Start was clicked more than once while the permission prompt was open,
+        // so this runs once per click. Only the first may start.
+        guard !isRecording else { return }
+        // Scan here, not in startRecording: the permission prompt can sit open for a long
+        // time, and a device plugged in (or removed) meanwhile would shift the indexes.
+        refreshDevices()
         let path = ffmpegPath
         let result = PreflightValidator.validate(
             settings: settings, availableDevices: devices,
