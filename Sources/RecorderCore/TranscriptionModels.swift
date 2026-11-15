@@ -23,7 +23,9 @@ public struct TranscriptionRequest: Equatable {
     public var audioURL: URL
     /// Name of the other speaker; sanitized before use. Empty = `TranscriptionSettings.defaultGuestName`.
     public var guestName: String
-    /// Where `<Guest>_Transcript.md` and its summary are written (normally the recording's folder).
+    /// Where `<Guest>_Transcript.md` and its summary are written. Defaults to
+    /// `defaultOutputDirectory(for:)`: the recording's own folder, or a subfolder of it when
+    /// other recordings share that folder.
     public var outputDirectory: URL
     /// Name used for the interviewer's turns. Empty = `TranscriptionSettings.interviewerName`.
     public var interviewerName: String
@@ -36,8 +38,40 @@ public struct TranscriptionRequest: Equatable {
     ) {
         self.audioURL = audioURL
         self.guestName = guestName
-        self.outputDirectory = outputDirectory ?? audioURL.deletingLastPathComponent()
+        self.outputDirectory = outputDirectory ?? Self.defaultOutputDirectory(for: audioURL)
         self.interviewerName = interviewerName
+    }
+
+    /// File extensions (lower case) that count as recordings when looking for neighbours.
+    static let audioExtensions: Set<String> = ["flac", "wav", "m4a", "mp3"]
+
+    /// Where the transcript of `audioURL` goes by default.
+    ///
+    /// The transcript is named after the guest (`<Guest>_Transcript.md`), so two recordings
+    /// that share a folder (the "folder per recording" option is off) would overwrite each
+    /// other's. If the audio's folder holds any other audio file (flac, wav, m4a, mp3, any
+    /// case), the transcript goes to the subfolder `<audio file name without extension>
+    /// transcript` next to the audio; otherwise to the audio's own folder, which keeps the
+    /// one-folder-per-recording layout unchanged. A folder that can't be listed counts as
+    /// having no other recordings.
+    public static func defaultOutputDirectory(
+        for audioURL: URL, fileManager: FileManager = .default
+    ) -> URL {
+        let folder = audioURL.deletingLastPathComponent()
+        let siblings = (try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? []
+        let hasOtherRecording = siblings.contains { name in
+            guard name != audioURL.lastPathComponent,
+                  !name.hasPrefix("."),  // AppleDouble "._x.flac" leftovers are not recordings
+                  audioExtensions.contains((name as NSString).pathExtension.lowercased())
+            else { return false }
+            var isDirectory: ObjCBool = false
+            let exists = fileManager.fileExists(
+                atPath: folder.appendingPathComponent(name).path, isDirectory: &isDirectory)
+            return exists && !isDirectory.boolValue
+        }
+        guard hasOtherRecording else { return folder }
+        let base = audioURL.deletingPathExtension().lastPathComponent
+        return folder.appendingPathComponent("\(base) transcript", isDirectory: true)
     }
 
     /// Makes a user-typed name safe for a file name (`<Guest>_Transcript.md`), for the

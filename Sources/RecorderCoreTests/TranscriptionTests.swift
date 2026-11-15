@@ -10,6 +10,12 @@ let sampleSummaryJSON = """
 "weak_match":false,"uncertain_turns":3}
 """
 
+private func makeTempDirectory(_ label: String) -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(label)-\(UUID().uuidString)")
+    try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}
+
 func runTranscriptionTests() {
     runTranscriptionModelTests()
     runPipelineLocatorTests()
@@ -54,6 +60,63 @@ private func runTranscriptionModelTests() {
         let request = TranscriptionRequest(audioURL: audio, guestName: "Al")
         try expectEqual(request.outputDirectory.path, "/Recordings/2026-11-15 10.00")
         try expectEqual(request.interviewerName, "")
+    }
+
+    test("default output directory is the audio's own folder when it holds no other recording") {
+        let root = makeTempDirectory("outdir"); defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("meeting.flac")
+        try Data("x".utf8).write(to: audio)
+        // Files that are not recordings, hidden files and directories don't count.
+        for name in ["notes.txt", "meeting.json", "Guest_Transcript.md", ".hidden.wav", "._meeting.flac", "clip.ogg"] {
+            try Data("x".utf8).write(to: root.appendingPathComponent(name))
+        }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("sub.wav", isDirectory: true), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: root.appendingPathComponent("nested/other.flac"))  // not a sibling
+        try expectEqual(TranscriptionRequest.defaultOutputDirectory(for: audio).path, root.path)
+        try expectEqual(TranscriptionRequest(audioURL: audio).outputDirectory.path, root.path)
+    }
+
+    test("default output directory is a subfolder next to the audio when recordings share the folder") {
+        let root = makeTempDirectory("outdir"); defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("meeting.flac")
+        try Data("x".utf8).write(to: audio)
+        for other in ["meeting-2.flac", "call.WAV", "talk.M4A", "song.mp3", "Memo.Flac"] {
+            let folder = makeTempDirectory("outdir-case"); defer { try? FileManager.default.removeItem(at: folder) }
+            let first = folder.appendingPathComponent("meeting.flac")
+            try Data("x".utf8).write(to: first)
+            try Data("x".utf8).write(to: folder.appendingPathComponent(other))
+            let expected = folder.appendingPathComponent("meeting transcript", isDirectory: true)
+            try expectEqual(TranscriptionRequest.defaultOutputDirectory(for: first).path, expected.path)
+            // The other recording gets a folder of its own, so the two can't overwrite each other.
+            let second = folder.appendingPathComponent(other)
+            let secondOut = TranscriptionRequest.defaultOutputDirectory(for: second)
+            try expectEqual(secondOut.deletingLastPathComponent().path, folder.path)
+            try expect(secondOut.path != expected.path, "both recordings would write to \(expected.path)")
+        }
+        try Data("x".utf8).write(to: root.appendingPathComponent("meeting-2.flac"))
+        let request = TranscriptionRequest(audioURL: audio, guestName: "Al")
+        try expectEqual(request.outputDirectory.path, root.appendingPathComponent("meeting transcript").path)
+        // The decision does not depend on what an earlier run left behind.
+        try FileManager.default.createDirectory(at: request.outputDirectory, withIntermediateDirectories: true)
+        try Data("# t".utf8).write(to: request.outputDirectory.appendingPathComponent("Al_Transcript.md"))
+        try expectEqual(TranscriptionRequest(audioURL: audio).outputDirectory.path, request.outputDirectory.path)
+    }
+
+    test("an explicit output directory wins over the default") {
+        let root = makeTempDirectory("outdir"); defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("meeting.flac")
+        try Data("x".utf8).write(to: audio)
+        try Data("x".utf8).write(to: root.appendingPathComponent("other.flac"))
+        let elsewhere = URL(fileURLWithPath: "/somewhere/else", isDirectory: true)
+        try expectEqual(TranscriptionRequest(audioURL: audio, outputDirectory: elsewhere).outputDirectory, elsewhere)
+    }
+
+    test("default output directory for an unreadable folder is the folder itself") {
+        let audio = URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString)/meeting.flac")
+        try expectEqual(TranscriptionRequest.defaultOutputDirectory(for: audio).path, audio.deletingLastPathComponent().path)
     }
 
     test("result decodes every summary field") {
