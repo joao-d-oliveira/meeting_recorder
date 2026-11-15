@@ -52,6 +52,8 @@ if [ ! -t 2 ]; then export HF_HUB_DISABLE_PROGRESS_BARS=1; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$HOME/.cache/diarize"
 PY="$CACHE/.venv/bin/python"
+# setup.sh creates this as its last step; see environment_ready.
+READY="$CACHE/.venv/.ready"
 
 # Short hash of stdin, using whatever the system has (macOS ships shasum and md5).
 short_hash() {
@@ -151,10 +153,25 @@ INTERVIEWER="${INTERVIEWER:-Joao}"
 # Validate every spec before doing any slow work.
 for spec in "$@"; do parse_spec "$spec"; done
 
-if [ ! -x "$PY" ]; then
+# setup.sh creates $READY as its final step. bin/python exists as soon as `uv venv` has run,
+# long before the packages are installed, so it alone proves nothing: a cancelled or failed
+# install would otherwise look like a working environment and fail later with
+# ModuleNotFoundError. A venv with python but without the marker is either unfinished or
+# complete but older than the marker (made by the skill's setup.sh, or by an earlier version of
+# this script). An import of the real packages tells them apart (a few seconds, once: a
+# complete venv gets the marker); an unfinished one goes through setup.sh again, which resumes.
+IMPORT_CHECK='import mlx_whisper, speechbrain, sklearn, soundfile'
+environment_ready() {
+  [ -x "$PY" ] || return 1
+  [ -f "$READY" ] && return 0
+  echo "Checking the transcription environment"
+  run_step "$PY" -c "$IMPORT_CHECK" >/dev/null 2>&1 || return 1
+  : > "$READY" 2>/dev/null || true
+}
+if ! environment_ready; then
   echo "STAGE: setup"
   echo "Setting up the transcription environment (one-time; downloads a few GB)"
-  "$HERE/setup.sh" || die "Setup of the transcription environment failed"
+  run_step "$HERE/setup.sh" || die "Setup of the transcription environment failed"
 fi
 command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found: brew install ffmpeg"
 
