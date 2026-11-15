@@ -90,6 +90,22 @@ public final class TranscriptionController: ObservableObject {
         let guest = TranscriptionRequest.sanitizedName(request.guestName, fallback: settings.defaultGuestName)
         let interviewer = TranscriptionRequest.sanitizedName(
             request.interviewerName, fallback: settings.interviewerName, lastResort: "Joao")
+        let home = baseEnvironment["HOME"] ?? NSHomeDirectory()
+
+        // The app hands the pipeline one recording, which can only be matched against a saved
+        // voiceprint; without one the run would fail after the (possibly multi-GB) first-time
+        // setup. Say so right away. Only the pipeline that ships with the app is known to keep
+        // its voiceprint there, so a pipeline folder chosen in Settings is left to decide for itself.
+        if locator.overrideDirectory(settings.pipelineDirectoryOverride) == nil {
+            let voiceprint = Self.voiceprintURL(interviewer: interviewer, home: home)
+            guard fileManager.fileExists(atPath: voiceprint.path) else {
+                fail("No voiceprint for \(interviewer) at \(voiceprint.path). Create it once with the "
+                    + "interview-transcribe skill from 2 or more recordings (e.g. run.sh with two interviews), "
+                    + "then try again.")
+                return
+            }
+        }
+
         let outputDirectory = request.outputDirectory.standardizedFileURL
         let run = Run(guest: guest, outputDirectory: outputDirectory)
         self.run = run
@@ -110,8 +126,7 @@ public final class TranscriptionController: ObservableObject {
                     outputDirectory.path,
                     "\(guest):\(audio.path)",
                 ],
-                environment: Self.environment(
-                    base: baseEnvironment, interviewer: interviewer, home: baseEnvironment["HOME"] ?? NSHomeDirectory()),
+                environment: Self.environment(base: baseEnvironment, interviewer: interviewer, home: home),
                 currentDirectory: pipeline.path)
         } catch {
             process = nil
@@ -140,6 +155,13 @@ public final class TranscriptionController: ObservableObject {
         state = .idle
         logLines = []
         run = nil
+    }
+
+    /// Where the pipeline keeps the interviewer's voiceprint:
+    /// `<home>/.cache/diarize/voiceprint-<name, lower-cased>.npy` (see `Pipeline/run.sh`).
+    public static func voiceprintURL(interviewer: String, home: String) -> URL {
+        URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent(".cache/diarize/voiceprint-\(interviewer.lowercased()).npy")
     }
 
     /// Environment for the child: the base environment plus a PATH that finds Homebrew tools,

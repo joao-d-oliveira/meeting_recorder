@@ -31,10 +31,7 @@ public struct PipelineLocator {
     }
 
     public func locate(override: String?) -> URL? {
-        if let override = override?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
-            let dir = URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
-            if containsRunScript(dir) { return dir }
-        }
+        if let dir = overrideDirectory(override) { return dir }
 
         if let resources = bundleResourceURL {
             let dir = resources.appendingPathComponent("Pipeline", isDirectory: true)
@@ -55,6 +52,15 @@ public struct PipelineLocator {
         let root = URL(fileURLWithPath: sourceFilePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         return repoPipeline(under: root)
+    }
+
+    /// The folder configured in Settings, if it is set and contains `run.sh`; the first
+    /// choice of `locate`. nil means the bundled (or development) copy is used.
+    public func overrideDirectory(_ override: String?) -> URL? {
+        guard let override = override?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty
+        else { return nil }
+        let dir = URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        return containsRunScript(dir) ? dir : nil
     }
 
     /// True if `directory` contains `run.sh`.

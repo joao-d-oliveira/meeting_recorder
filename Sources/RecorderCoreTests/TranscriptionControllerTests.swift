@@ -49,18 +49,30 @@ private func waitOnMain(timeout: TimeInterval, until condition: () -> Bool) -> B
     return true
 }
 
-/// A temp folder with a recording, plus the output folder the pipeline would write to.
+/// A temp folder with a recording, the output folder the pipeline would write to, and a HOME
+/// whose ~/.cache/diarize holds voiceprints for the interviewers the tests use (the controller
+/// refuses to start without one).
 private struct Fixture {
     let root: URL
     let audio: URL
     let outputDirectory: URL
+    let home: URL
 
-    init() {
+    init(voiceprints: [String] = ["joao", "maria", "ana"]) {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("tc-test-\(UUID().uuidString)")
         outputDirectory = root.appendingPathComponent("rec")
         audio = outputDirectory.appendingPathComponent("meeting.flac")
+        home = root.appendingPathComponent("home")
         try! FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try! Data("x".utf8).write(to: audio)
+        for name in voiceprints { addVoiceprint(name) }
+    }
+
+    /// `name` is the lower-cased interviewer name, as in the file name.
+    func addVoiceprint(_ name: String) {
+        let url = TranscriptionController.voiceprintURL(interviewer: name, home: home.path)
+        try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! Data("vp".utf8).write(to: url)
     }
 
     func writeOutputs(guest: String, summary: String? = sampleSummaryJSON, transcript: Bool = true) {
@@ -83,18 +95,21 @@ private let fakePipelineLocator = PipelineLocator(
     executableURL: nil,
     sourceFilePath: "/nowhere/Sources/RecorderCore/X.swift")
 
-private let testEnvironment = [
-    "HOME": "/Users/tester", "PATH": "/usr/bin:/custom/bin:/opt/homebrew/bin",
-    "REFRESH_VOICEPRINT": "1", "OTHER": "kept",
-]
+private func testEnvironment(home: URL) -> [String: String] {
+    [
+        "HOME": home.path, "PATH": "/usr/bin:/custom/bin:/opt/homebrew/bin",
+        "REFRESH_VOICEPRINT": "1", "OTHER": "kept",
+    ]
+}
 
 func runTranscriptionControllerTests() {
     func makeController(
-        locator: PipelineLocator = fakePipelineLocator, killAfter: TimeInterval = 4
+        _ fixture: Fixture, locator: PipelineLocator = fakePipelineLocator, killAfter: TimeInterval = 4
     ) -> (TranscriptionController, FakePipelineProcess) {
         let fake = FakePipelineProcess()
         let controller = TranscriptionController(
-            makeProcess: { fake }, locator: locator, baseEnvironment: testEnvironment, killAfter: killAfter)
+            makeProcess: { fake }, locator: locator, baseEnvironment: testEnvironment(home: fixture.home),
+            killAfter: killAfter)
         return (controller, fake)
     }
 
@@ -118,7 +133,7 @@ func runTranscriptionControllerTests() {
 
     test("start launches run.sh through bash with the guest spec") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         try expectEqual(fake.started?.executable, "/bin/bash")
         try expectEqual(fake.started?.arguments, [
@@ -131,11 +146,11 @@ func runTranscriptionControllerTests() {
 
     test("child environment has INTERVIEWER, HOME and a Homebrew PATH, and drops REFRESH_VOICEPRINT") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture, interviewer: "Maria", settings: TranscriptionSettings(interviewerName: "Ignored"))
         guard let env = fake.started?.environment else { throw TestFailure(description: "no environment passed") }
         try expectEqual(env["INTERVIEWER"], "Maria")
-        try expectEqual(env["HOME"], "/Users/tester")
+        try expectEqual(env["HOME"], fixture.home.path)
         try expectEqual(env["OTHER"], "kept")
         try expectEqual(env["REFRESH_VOICEPRINT"], nil)
         try expectEqual(env["PIPELINE_PROGRESS"], "1")
@@ -145,17 +160,17 @@ func runTranscriptionControllerTests() {
 
     test("interviewer falls back to the settings, then to Joao") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture, interviewer: "", settings: TranscriptionSettings(interviewerName: "Ana"))
         try expectEqual(fake.started?.environment?["INTERVIEWER"], "Ana")
-        let (second, fake2) = makeController()
+        let (second, fake2) = makeController(fixture)
         start(second, fixture, interviewer: "", settings: TranscriptionSettings(interviewerName: " / "))
         try expectEqual(fake2.started?.environment?["INTERVIEWER"], "Joao")
     }
 
     test("empty guest name uses the default guest name from the settings") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture, guest: "  ", settings: TranscriptionSettings(defaultGuestName: "Visitor"))
         try expect(fake.started?.arguments.last?.hasPrefix("Visitor:") == true,
                    "spec was \(String(describing: fake.started?.arguments.last))")
@@ -163,7 +178,7 @@ func runTranscriptionControllerTests() {
 
     test("guest name is sanitized in the spec and in the files looked for afterwards") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture, guest: "Al/ice:X")
         try expect(fake.started?.arguments.last?.hasPrefix("Al-ice-X:/") == true,
                    "spec was \(String(describing: fake.started?.arguments.last))")
@@ -177,7 +192,7 @@ func runTranscriptionControllerTests() {
 
     test("STAGE lines move through the stages and reset progress") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fake.emitStdout("STAGE: setup")
         try expectEqual(controller.state, .running(stage: .setup, progress: nil))
@@ -193,7 +208,7 @@ func runTranscriptionControllerTests() {
 
     test("PROGRESS is clamped, parsed from stderr too, and ignored outside the transcribe stage") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fake.emitStdout("PROGRESS: 50")  // still converting
         try expectEqual(controller.state, .running(stage: .convert, progress: nil))
@@ -214,7 +229,7 @@ func runTranscriptionControllerTests() {
 
     test("exit 0 with a valid summary finishes with the decoded result") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fixture.writeOutputs(guest: "Alice")
         fake.terminate(status: 0)
@@ -231,7 +246,7 @@ func runTranscriptionControllerTests() {
 
     test("exit 0 without a summary file fails with a clear message") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fake.emitStdout("some output")
         fake.terminate(status: 0)
@@ -242,7 +257,7 @@ func runTranscriptionControllerTests() {
 
     test("exit 0 with an unreadable summary fails") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fixture.writeOutputs(guest: "Alice", summary: "{ nope")
         fake.terminate(status: 0)
@@ -252,7 +267,7 @@ func runTranscriptionControllerTests() {
 
     test("exit 0 with a summary but no transcript fails") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fixture.writeOutputs(guest: "Alice", transcript: false)
         fake.terminate(status: 0)
@@ -262,7 +277,7 @@ func runTranscriptionControllerTests() {
 
     test("non-zero exit fails with the last 20 log lines and the last line in the message") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fake.emitStdout("STAGE: convert")
         for i in 1...30 { fake.emitStderr("line \(i)") }
@@ -283,7 +298,7 @@ func runTranscriptionControllerTests() {
 
     test("the log buffer is bounded") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         for i in 1...1000 { fake.emitStderr("l\(i)") }
         try expectEqual(controller.recentLog.count, 20)
@@ -295,7 +310,7 @@ func runTranscriptionControllerTests() {
 
     test("cancel interrupts the pipeline and ends in cancelled once it exits") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         controller.cancel()
         try expectEqual(fake.interruptCount, 1)
@@ -313,7 +328,7 @@ func runTranscriptionControllerTests() {
 
     test("cancel escalates to a kill when the pipeline ignores the interrupt") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController(killAfter: 0.05)
+        let (controller, fake) = makeController(fixture, killAfter: 0.05)
         start(controller, fixture)
         controller.cancel()
         try expect(waitOnMain(timeout: 2) { fake.killed }, "force kill never happened")
@@ -323,7 +338,7 @@ func runTranscriptionControllerTests() {
 
     test("a late kill timer does nothing after a clean cancellation") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController(killAfter: 0.05)
+        let (controller, fake) = makeController(fixture, killAfter: 0.05)
         start(controller, fixture)
         controller.cancel()
         fake.terminate(status: 130)
@@ -332,7 +347,8 @@ func runTranscriptionControllerTests() {
     }
 
     test("cancel while idle or finished does nothing") {
-        let (controller, fake) = makeController()
+        let fixture = Fixture(); defer { fixture.remove() }
+        let (controller, fake) = makeController(fixture)
         controller.cancel()
         try expectEqual(controller.state, .idle)
         try expectEqual(fake.interruptCount, 0)
@@ -340,7 +356,7 @@ func runTranscriptionControllerTests() {
 
     test("exit 0 racing a cancel still reports cancelled") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fixture.writeOutputs(guest: "Alice")
         controller.cancel()
@@ -352,7 +368,7 @@ func runTranscriptionControllerTests() {
         let fixture = Fixture(); defer { fixture.remove() }
         let missing = PipelineLocator(
             fileExists: { _ in false }, bundleResourceURL: nil, executableURL: nil, sourceFilePath: "/x/y/z/w.swift")
-        let (controller, fake) = makeController(locator: missing)
+        let (controller, fake) = makeController(fixture, locator: missing)
         start(controller, fixture)
         let failure = try expectFailed(controller.state)
         try expect(failure.message.contains("pipeline not found"), failure.message)
@@ -360,7 +376,8 @@ func runTranscriptionControllerTests() {
     }
 
     test("start fails cleanly when the recording is missing") {
-        let (controller, fake) = makeController()
+        let fixture = Fixture(); defer { fixture.remove() }
+        let (controller, fake) = makeController(fixture)
         controller.start(
             request: TranscriptionRequest(audioURL: URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).flac")),
             settings: TranscriptionSettings())
@@ -369,9 +386,67 @@ func runTranscriptionControllerTests() {
         try expect(fake.started == nil)
     }
 
+    test("start fails at once, with the voiceprint path, when the interviewer has no voiceprint") {
+        let fixture = Fixture(voiceprints: []); defer { fixture.remove() }
+        let (controller, fake) = makeController(fixture)
+        start(controller, fixture, interviewer: "Zed")
+        let failure = try expectFailed(controller.state)
+        let path = fixture.home.appendingPathComponent(".cache/diarize/voiceprint-zed.npy").path
+        try expectEqual(
+            failure.message,
+            "No voiceprint for Zed at \(path). Create it once with the interview-transcribe skill from "
+                + "2 or more recordings (e.g. run.sh with two interviews), then try again.")
+        try expect(fake.started == nil, "the pipeline must not be launched")
+        try expect(!controller.isCancelling)
+    }
+
+    test("the voiceprint is looked up by the lower-cased interviewer name under the child's HOME") {
+        let fixture = Fixture(voiceprints: ["maria josé"]); defer { fixture.remove() }
+        let (controller, fake) = makeController(fixture)
+        start(controller, fixture, interviewer: "Maria José")
+        try expectEqual(controller.state, .running(stage: .convert, progress: nil))
+        try expect(fake.started != nil)
+        try expectEqual(
+            TranscriptionController.voiceprintURL(interviewer: "Ana", home: "/h").path,
+            "/h/.cache/diarize/voiceprint-ana.npy")
+    }
+
+    test("the interviewer from the settings is the one that needs a voiceprint") {
+        let fixture = Fixture(voiceprints: ["joao"]); defer { fixture.remove() }
+        let (controller, fake) = makeController(fixture)
+        start(controller, fixture, interviewer: "", settings: TranscriptionSettings(interviewerName: "Ana"))
+        let failure = try expectFailed(controller.state)
+        try expect(failure.message.hasPrefix("No voiceprint for Ana at "), failure.message)
+        try expect(fake.started == nil)
+        fixture.addVoiceprint("ana")
+        start(controller, fixture, interviewer: "", settings: TranscriptionSettings(interviewerName: "Ana"))
+        try expectEqual(controller.state, .running(stage: .convert, progress: nil))
+        try expectEqual(fake.started?.environment?["INTERVIEWER"], "Ana")
+    }
+
+    test("a pipeline folder chosen in Settings is not held to the voiceprint check") {
+        let fixture = Fixture(voiceprints: []); defer { fixture.remove() }
+        let custom = PipelineLocator(
+            fileExists: { $0 == "/custom/run.sh" }, bundleResourceURL: nil, executableURL: nil,
+            sourceFilePath: "/x/y/z/w.swift")
+        let (controller, fake) = makeController(fixture, locator: custom)
+        start(controller, fixture, settings: TranscriptionSettings(pipelineDirectoryOverride: "/custom"))
+        try expectEqual(controller.state, .running(stage: .convert, progress: nil))
+        try expectEqual(fake.started?.arguments.first, "/custom/run.sh")
+
+        // An override that doesn't contain run.sh falls back to the bundled pipeline: checked again.
+        let (second, fake2) = makeController(fixture, locator: PipelineLocator(
+            fileExists: { $0 == "/fake/Pipeline/run.sh" }, bundleResourceURL: URL(fileURLWithPath: "/fake"),
+            executableURL: nil, sourceFilePath: "/x/y/z/w.swift"))
+        start(second, fixture, settings: TranscriptionSettings(pipelineDirectoryOverride: "/nowhere"))
+        let failure = try expectFailed(second.state)
+        try expect(failure.message.hasPrefix("No voiceprint for Joao"), failure.message)
+        try expect(fake2.started == nil)
+    }
+
     test("a launch error becomes a failure and allows another attempt") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         fake.startError = LaunchFailure()
         start(controller, fixture)
         let failure = try expectFailed(controller.state)
@@ -383,7 +458,7 @@ func runTranscriptionControllerTests() {
 
     test("start is ignored while a run is in progress, and allowed again afterwards") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture, guest: "First")
         fake.emitStdout("STAGE: diarize")
         start(controller, fixture, guest: "Second")
@@ -400,7 +475,7 @@ func runTranscriptionControllerTests() {
 
     test("lines arriving after the run ended are ignored") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         fake.terminate(status: 1)
         let before = controller.state
@@ -411,7 +486,7 @@ func runTranscriptionControllerTests() {
 
     test("reset returns to idle after a run, but not while running") {
         let fixture = Fixture(); defer { fixture.remove() }
-        let (controller, fake) = makeController()
+        let (controller, fake) = makeController(fixture)
         start(controller, fixture)
         controller.reset()
         guard case .running = controller.state else {
