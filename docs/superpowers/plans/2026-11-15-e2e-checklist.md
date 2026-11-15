@@ -30,6 +30,8 @@ Tick a box only when the expected result was observed; note failures next to the
   Expected: far-side audio and your voice are both audible, no dropouts, no clipping/distortion.
 - [ ] `flac -t "$(ls -t ~/Documents/Recordings/meetings/*/meeting.flac | head -1)"`
   Expected: passes (no "invalid residual").
+- [ ] Start another recording and press Esc.
+  Expected: nothing happens, it keeps recording. Press Cmd-. (Command-period): it stops and saves like the button.
 
 ## 2. Device-missing handling
 

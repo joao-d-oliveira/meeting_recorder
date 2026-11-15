@@ -177,7 +177,10 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
-                .keyboardShortcut(.escape, modifiers: [])
+                // Cmd-. rather than bare Esc: Esc is pressed by reflex (dismissing a field, a
+                // sheet or a file picker) and must not end a meeting capture.
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Stop and save the recording (⌘.)")
             } else {
                 Button {
                     model.startRecording()

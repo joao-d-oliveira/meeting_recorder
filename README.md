@@ -38,6 +38,9 @@ own level meter while recording, and the inputs cannot be changed until it stops
 more inputs than fit on the screen the list scrolls. Settings (gear icon) holds the
 filename prefix, one-folder-per-recording, the ffmpeg path and the transcription options.
 
+Stop a recording with **Stop Recording** or Cmd-. (Command-period). Esc does nothing, so
+a stray keypress cannot end a capture.
+
 Settings saved by older versions (one remote device plus one microphone) are
 migrated to two inputs automatically.
 
