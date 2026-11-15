@@ -19,6 +19,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var recordedInputIDs: [UUID] = []
     @Published var showSettingsSheet = false
     @Published var showFolderPicker = false
+    /// True while a device scan runs in the background (it can take a moment, and a stuck
+    /// one is killed after `DeviceScanner.defaultTimeout`).
+    @Published private(set) var isScanningDevices = false
+    /// True from a Start click until the recording has started or been refused: the
+    /// permission prompt and the fresh device scan sit in between.
+    @Published private(set) var isStarting = false
+    /// Why the device list could not be read (scan stuck or ffmpeg not runnable); nil if fine.
+    @Published private(set) var scanProblem: String?
 
     // MARK: Transcription panel state
 
@@ -47,6 +55,9 @@ final class AppModel: ObservableObject {
     private let locator = FFmpegLocator()
     private let pipelineLocator = PipelineLocator()
     private var cancellables: Set<AnyCancellable> = []
+    /// The newest scan wins: an older one is cancelled and its result ignored.
+    private var scanGeneration = 0
+    private var scanCancellation: DeviceScanCancellation?
     /// Set once the user has agreed to quit: from then on nothing may start a recording or a
     /// pipeline run, because the quit is already waiting on the ones that were running.
     @Published private(set) var isQuitting = false
@@ -94,47 +105,113 @@ final class AppModel: ObservableObject {
         refreshDevices()
     }
 
+    /// Rescans the audio devices in the background; `devices` is updated when it is done.
     func refreshDevices() {
+        guard !isQuitting else { return }
         guard let path = ffmpegPath else {
+            cancelScan()
             devices = []
+            scanProblem = nil
             issues = [.ffmpegNotFound]
             return
         }
         issues.removeAll { $0 == .ffmpegNotFound }
-        devices = DeviceScanner.scan(ffmpegPath: path)
+        Task { _ = await scanDevices(path: path) }
     }
 
-    func startRecording() {
-        // A double click (or a click while the first-run permission prompt is up) must not
-        // start twice; the controller ignores a second start, but the model would not.
-        // While quitting the app only waits for the recording it stops: a new one would be
-        // left running when the quit completes.
-        guard !isQuitting, !isRecording else { return }
-        issues = []
-        notices = []
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                Task { @MainActor in self.beginRecording(micAuthorized: granted) }
+    /// Runs ffmpeg's device listing off the main thread, so a stalled audio driver cannot
+    /// freeze the window (or Cmd-Q). Starting a scan cancels the one before it. The result
+    /// is applied to `devices` / `scanProblem` unless a newer scan or a quit replaced it.
+    private func scanDevices(path: String) async -> DeviceScanResult {
+        cancelScan()
+        let cancellation = DeviceScanCancellation()
+        scanCancellation = cancellation
+        let generation = scanGeneration
+        isScanningDevices = true
+        let result: DeviceScanResult = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(
+                    returning: DeviceScanner.scan(ffmpegPath: path, cancellation: cancellation))
             }
-        case .authorized:
-            beginRecording(micAuthorized: true)
-        default:
-            beginRecording(micAuthorized: false)
+        }
+        guard generation == scanGeneration else { return result }
+        scanCancellation = nil
+        isScanningDevices = false
+        if case .devices(let found) = result { devices = found }
+        scanProblem = Self.scanProblem(for: result)
+        return result
+    }
+
+    /// What to tell the user when a scan did not produce a device list; nil for a good one.
+    private static func scanProblem(for result: DeviceScanResult) -> String? {
+        switch result {
+        case .devices:
+            return nil
+        case .timedOut:
+            return "Listing the audio devices took longer than "
+                + "\(Int(DeviceScanner.defaultTimeout)) seconds and was stopped. "
+                + "Check the audio drivers, then use Rescan."
+        case .failedToLaunch(let message):
+            return "Could not run ffmpeg to list the audio devices: \(message)"
+        case .cancelled:
+            return "Listing the audio devices was interrupted. Try again."
         }
     }
 
-    private func beginRecording(micAuthorized: Bool) {
-        // First run: Start was clicked more than once while the permission prompt was open,
-        // so this runs once per click. Only the first may start. The permission answer can
-        // also arrive after the user has agreed to quit.
+    /// Stops the scan in flight, if any, and makes its result count for nothing.
+    private func cancelScan() {
+        scanCancellation?.cancel()
+        scanCancellation = nil
+        scanGeneration += 1
+        isScanningDevices = false
+    }
+
+    func startRecording() {
+        // A double click (or a click while the first-run permission prompt is up or the
+        // devices are being scanned) must not start twice.
+        // While quitting the app only waits for the recording it stops: a new one would be
+        // left running when the quit completes.
+        guard !isQuitting, !isRecording, !isStarting else { return }
+        isStarting = true
+        issues = []
+        notices = []
+        scanProblem = nil
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                Task { @MainActor in await self.beginRecording(micAuthorized: granted) }
+            }
+        case .authorized:
+            Task { await beginRecording(micAuthorized: true) }
+        default:
+            Task { await beginRecording(micAuthorized: false) }
+        }
+    }
+
+    private func beginRecording(micAuthorized: Bool) async {
+        defer { isStarting = false }
+        // The permission answer can arrive after the user has agreed to quit.
         guard !isQuitting, !isRecording else { return }
-        // Scan here, not in startRecording: the permission prompt can sit open for a long
-        // time, and a device plugged in (or removed) meanwhile would shift the indexes.
-        refreshDevices()
         let path = ffmpegPath
+        var available: [AudioDevice] = []
+        if let path {
+            // Scan here, not in startRecording: the permission prompt can sit open for a long
+            // time, and a device plugged in (or removed) meanwhile would shift the indexes.
+            let scan = await scanDevices(path: path)
+            // Things happen during the await: the user may have agreed to quit meanwhile.
+            guard !isQuitting, !isRecording else { return }
+            // A scan that failed or was cut short says nothing about the devices: starting
+            // on a stale list could record the wrong inputs.
+            guard case .devices(let found) = scan else {
+                scanProblem = Self.scanProblem(for: scan)
+                return
+            }
+            available = found
+        } else {
+            devices = []
+        }
         let result = PreflightValidator.validate(
-            settings: settings, availableDevices: devices,
+            settings: settings, availableDevices: available,
             ffmpegPath: path, micAuthorized: micAuthorized)
         notices = result.notices
         guard result.canStart, let path else {
@@ -286,6 +363,8 @@ final class AppModel: ObservableObject {
     /// (stopping a recording saves it, which would otherwise auto-start a transcription).
     func prepareForQuit() {
         isQuitting = true
+        // A stuck scan would otherwise outlive the app as an orphaned ffmpeg.
+        cancelScan()
     }
 
     /// Back to the guest-name form for the same file (to re-run with another name).

@@ -33,4 +33,7 @@ func runDeviceListParserTests() {
     test("returns empty for output with no audio section") {
         try expectEqual(DeviceListParser.parseAudioDevices(from: "garbage\nmore garbage"), [])
     }
+
+    // Scanning is parsing plus running the process; it shares the fixture above.
+    runDeviceScannerTests()
 }

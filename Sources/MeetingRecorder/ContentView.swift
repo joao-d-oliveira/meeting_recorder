@@ -41,6 +41,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Audio Inputs").font(.headline)
+                if model.isScanningDevices {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning…").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button {
                     model.refreshDevices()
@@ -48,7 +52,7 @@ struct ContentView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Rescan audio devices")
-                .disabled(model.isRecording)
+                .disabled(model.isRecording || model.isStarting)
                 Button {
                     model.showSettingsSheet = true
                 } label: {
@@ -178,12 +182,15 @@ struct ContentView: View {
                 Button {
                     model.startRecording()
                 } label: {
-                    Label("Start Recording", systemImage: "record.circle")
+                    // Between the click and the recording: the permission prompt (first run)
+                    // and a fresh device scan.
+                    Label(model.isStarting ? "Starting…" : "Start Recording",
+                          systemImage: model.isStarting ? "hourglass" : "record.circle")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .disabled(model.isQuitting)
+                .disabled(model.isStarting || model.isQuitting)
             }
             if case .recording(let startedAt) = model.controller.state {
                 TimelineView(.periodic(from: startedAt, by: 1)) { context in
@@ -230,6 +237,12 @@ struct ContentView: View {
                     .font(.caption)
                 }
             }
+        }
+        if let problem = model.scanProblem {
+            Label(problem, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
         }
         ForEach(Array(model.issues.enumerated()), id: \.offset) { _, issue in
             Label(issue.description, systemImage: "exclamationmark.triangle")
