@@ -78,11 +78,18 @@ struct TranscriptionPanel: View {
                 Button(buttonTitle) { model.startTranscription() }
                     .buttonStyle(.borderedProminent)
             }
+            if let note = model.transcriptOutputNote {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let existing = model.transcriptThatWouldBeReplaced {
                 Label("\(existing.lastPathComponent) already exists in this folder and will be replaced.",
                       systemImage: "exclamationmark.triangle")
                     .font(.caption2)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -140,6 +147,7 @@ struct TranscriptionPanel: View {
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.bold())
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
                 statRow("Turns", "\(result.turnCount)")
@@ -175,10 +183,13 @@ struct TranscriptionPanel: View {
 
     private func failedBody(message: String, logTail: [String]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            // The message can be long (it ends with the pipeline's last output line): let it
+            // wrap to as many lines as it needs instead of truncating.
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
             if !logTail.isEmpty {
                 DisclosureGroup("Pipeline output") {
                     ScrollView {

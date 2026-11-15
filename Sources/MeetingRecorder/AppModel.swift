@@ -240,23 +240,37 @@ final class AppModel: ObservableObject {
             settings.transcription.interviewerName, fallback: "", lastResort: "Joao")
     }
 
+    /// What a run would use right now: the panel's file and guest name. The output directory
+    /// is left to `TranscriptionRequest`, which decides where the transcript goes; the
+    /// warnings below read it back from here instead of guessing from the audio's folder.
+    private func currentRequest() -> TranscriptionRequest? {
+        guard let audio = transcriptionTarget else { return nil }
+        return TranscriptionRequest(audioURL: audio, guestName: guestName)
+    }
+
     /// The transcript a run for the current panel would overwrite, if there already is one.
     var transcriptThatWouldBeReplaced: URL? {
-        guard let audio = transcriptionTarget else { return nil }
+        guard let request = currentRequest() else { return nil }
         let guest = TranscriptionRequest.sanitizedName(
-            guestName, fallback: settings.transcription.defaultGuestName)
-        let url = audio.deletingLastPathComponent().appendingPathComponent("\(guest)_Transcript.md")
+            request.guestName, fallback: settings.transcription.defaultGuestName)
+        let url = request.outputDirectory.appendingPathComponent("\(guest)_Transcript.md")
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Runs the pipeline for the panel's file; the transcript lands in that file's folder.
+    /// Set when the transcript will not be written in the audio file's own folder.
+    var transcriptOutputNote: String? {
+        guard let request = currentRequest() else { return nil }
+        let output = request.outputDirectory.standardizedFileURL
+        guard output != request.audioURL.deletingLastPathComponent().standardizedFileURL else { return nil }
+        return "The transcript is written to \"\(output.lastPathComponent)\" next to the audio file."
+    }
+
+    /// Runs the pipeline for the panel's file.
     func startTranscription() {
-        guard !isQuitting, !isTranscribing, let audio = transcriptionTarget else { return }
+        guard !isQuitting, !isTranscribing, let request = currentRequest() else { return }
         transcriptionStartedAt = Date()
         transcriptionFinishedAt = nil
-        transcription.start(
-            request: TranscriptionRequest(audioURL: audio, guestName: guestName),
-            settings: settings.transcription)
+        transcription.start(request: request, settings: settings.transcription)
     }
 
     func cancelTranscription() {
