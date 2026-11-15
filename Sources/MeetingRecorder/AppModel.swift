@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import RecorderCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -19,9 +20,32 @@ final class AppModel: ObservableObject {
     @Published var showSettingsSheet = false
     @Published var showFolderPicker = false
 
+    // MARK: Transcription panel state
+
+    /// The audio file the transcription panel is about. A run is tied to the file it was
+    /// started for: this only changes while no run is in progress, so a recording that is
+    /// saved mid-run can never take over the panel (it waits in `pendingRecording`).
+    @Published private(set) var transcriptionTarget: URL?
+    /// Guest name typed in the panel (empty = `defaultGuestName` from the settings).
+    @Published var guestName = ""
+    @Published private(set) var transcriptionStartedAt: Date?
+    @Published private(set) var transcriptionFinishedAt: Date?
+    /// A recording saved while a transcription was running; offered once it ends.
+    @Published private(set) var pendingRecording: URL?
+    /// The last successful transcript, kept in view when the panel moves on to another
+    /// file so a weak-match warning is not lost.
+    @Published private(set) var previousTranscript: PreviousTranscript?
+
+    struct PreviousTranscript: Equatable {
+        let audioURL: URL
+        let result: TranscriptionResult
+    }
+
     let controller = RecordingController()
+    let transcription: TranscriptionController
     private let store: SettingsStore
     private let locator = FFmpegLocator()
+    private let pipelineLocator = PipelineLocator()
     private var cancellables: Set<AnyCancellable> = []
 
     var ffmpegPath: String? {
@@ -37,12 +61,32 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    var isTranscribing: Bool {
+        if case .running = transcription.state { return true }
+        return false
+    }
+
     init(store: SettingsStore = SettingsStore()) {
         self.store = store
         self.settings = store.load()
+        self.transcription = TranscriptionController(locator: pipelineLocator)
         // Forward nested ObservableObject changes so views observing the model re-render.
         controller.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        transcription.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // $state emits in willSet; the hop lets the controllers finish their change first.
+        controller.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                if case .saved(let url) = state { self?.recordingSaved(url) }
+            }
+            .store(in: &cancellables)
+        transcription.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in self?.transcriptionStateChanged(state) }
             .store(in: &cancellables)
         refreshDevices()
     }
@@ -174,4 +218,124 @@ final class AppModel: ObservableObject {
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+
+    // MARK: - Transcription
+
+    /// "2026-11-15_10-30-00/meeting.flac": every recording is called meeting.flac, so the
+    /// folder is what tells two of them apart.
+    func displayName(for audio: URL) -> String {
+        let folder = audio.deletingLastPathComponent().lastPathComponent
+        return folder.isEmpty ? audio.lastPathComponent : "\(folder)/\(audio.lastPathComponent)"
+    }
+
+    /// What the guest field shows when empty: the guest label a run would actually use.
+    var guestPlaceholder: String {
+        TranscriptionRequest.sanitizedName(
+            settings.transcription.defaultGuestName, fallback: "", lastResort: "Guest")
+    }
+
+    var interviewerDisplayName: String {
+        TranscriptionRequest.sanitizedName(
+            settings.transcription.interviewerName, fallback: "", lastResort: "Joao")
+    }
+
+    /// The transcript a run for the current panel would overwrite, if there already is one.
+    var transcriptThatWouldBeReplaced: URL? {
+        guard let audio = transcriptionTarget else { return nil }
+        let guest = TranscriptionRequest.sanitizedName(
+            guestName, fallback: settings.transcription.defaultGuestName)
+        let url = audio.deletingLastPathComponent().appendingPathComponent("\(guest)_Transcript.md")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Runs the pipeline for the panel's file; the transcript lands in that file's folder.
+    func startTranscription() {
+        guard !isTranscribing, let audio = transcriptionTarget else { return }
+        transcriptionStartedAt = Date()
+        transcriptionFinishedAt = nil
+        transcription.start(
+            request: TranscriptionRequest(audioURL: audio, guestName: guestName),
+            settings: settings.transcription)
+    }
+
+    func cancelTranscription() {
+        transcription.cancel()
+    }
+
+    /// Back to the guest-name form for the same file (to re-run with another name).
+    func prepareTranscriptionRerun() {
+        guard !isTranscribing else { return }
+        transcription.reset()
+    }
+
+    /// "Transcribe a file…": any flac/wav/m4a/mp3, not only a fresh recording.
+    func chooseAudioFile() {
+        guard !isTranscribing else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose an audio file to transcribe"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ["flac", "wav", "m4a", "mp3"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+        panel.directoryURL = settings.outputFolder
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        adoptAudio(url, autostart: false)
+    }
+
+    /// Moves a recording that was saved mid-run into the panel (after the run has ended).
+    func transcribePendingRecording() {
+        guard let url = pendingRecording else { return }
+        adoptAudio(url, autostart: false)
+    }
+
+    func openTranscript(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    private func recordingSaved(_ url: URL) {
+        if isTranscribing {
+            pendingRecording = url.standardizedFileURL
+        } else {
+            pendingRecording = nil  // superseded by this newer recording
+            adoptAudio(url, autostart: settings.transcription.autoTranscribe)
+        }
+    }
+
+    private func transcriptionStateChanged(_ state: TranscriptionState) {
+        switch state {
+        case .running, .idle:
+            return
+        case .finished, .failed, .cancelled:
+            if transcriptionFinishedAt == nil, transcriptionStartedAt != nil {
+                transcriptionFinishedAt = Date()
+            }
+        }
+        // A recording that was saved mid-run is transcribed next when auto-transcribe is on,
+        // but only after a successful run: after a cancel or a failure the user decides.
+        // `state` can be stale after the hop; the controller has the current one.
+        if case .finished = state, case .finished = transcription.state,
+           let next = pendingRecording, settings.transcription.autoTranscribe {
+            adoptAudio(next, autostart: true)
+        }
+    }
+
+    /// Points the panel at `audio`. Never called while a run is in progress.
+    private func adoptAudio(_ audio: URL, autostart: Bool) {
+        guard !isTranscribing else { return }
+        let audio = audio.standardizedFileURL
+        if case .finished(let result) = transcription.state, let old = transcriptionTarget, old != audio {
+            previousTranscript = PreviousTranscript(audioURL: old, result: result)
+        }
+        transcription.reset()
+        transcriptionTarget = audio
+        transcriptionStartedAt = nil
+        transcriptionFinishedAt = nil
+        guestName = ""
+        if pendingRecording == audio { pendingRecording = nil }
+        if autostart { startTranscription() }
+    }
 }
+
