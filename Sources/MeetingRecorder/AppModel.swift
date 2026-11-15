@@ -109,12 +109,9 @@ final class AppModel: ObservableObject {
         devices.contains { $0.name == name }
     }
 
-    /// Names offered by an input's device picker: every scanned device, plus the saved
-    /// name when it isn't connected right now so the selection stays visible.
+    /// Names offered by an input's device picker (unique, so they can serve as picker ids).
     func deviceChoices(for current: String) -> [String] {
-        var names = devices.map(\.name)
-        if !current.isEmpty, !names.contains(current) { names.append(current) }
-        return names
+        InputResolver.deviceChoices(devices: devices, current: current)
     }
 
     func addInput() {

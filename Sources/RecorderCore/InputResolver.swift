@@ -78,6 +78,19 @@ public enum InputResolver {
             unnamedPositions: unnamedPositions, duplicateDeviceNames: duplicateDeviceNames)
     }
 
+    /// Names offered by an input's device picker: every scanned device name once (two devices
+    /// can share a name, and the picker needs unique tags), in scan order, plus `current` when
+    /// it isn't connected right now so the saved selection stays visible.
+    public static func deviceChoices(devices: [AudioDevice], current: String) -> [String] {
+        var names: [String] = []
+        var seen: Set<String> = []
+        for device in devices where seen.insert(device.name).inserted {
+            names.append(device.name)
+        }
+        if !current.isEmpty, !seen.contains(current) { names.append(current) }
+        return names
+    }
+
     /// Convenience: just the inputs to hand to the command builder.
     public static func resolvedInputs(for inputs: [InputConfig], devices: [AudioDevice]) -> [ResolvedInput] {
         resolve(inputs: inputs, devices: devices).resolvedInputs

@@ -117,6 +117,27 @@ func runInputConfigTests() {
         try expectEqual(InputResolver.resolve(inputs: inputs, devices: devices).duplicateDeviceNames, [])
     }
 
+    // MARK: picker choices
+
+    test("device choices list each name once, in scan order, even when two devices share it") {
+        let twins = [
+            AudioDevice(index: 0, name: "USB Mic"), AudioDevice(index: 1, name: "BlackHole 2ch"),
+            AudioDevice(index: 2, name: "USB Mic"), AudioDevice(index: 3, name: "MacBook Air Microphone"),
+            AudioDevice(index: 4, name: "BlackHole 2ch"),
+        ]
+        let choices = InputResolver.deviceChoices(devices: twins, current: "USB Mic")
+        try expectEqual(choices, ["USB Mic", "BlackHole 2ch", "MacBook Air Microphone"])
+        try expectEqual(Set(choices).count, choices.count)
+    }
+
+    test("device choices keep a disconnected saved selection, once, at the end") {
+        let choices = InputResolver.deviceChoices(devices: devices, current: "WF-1000XM6")
+        try expectEqual(choices, ["BlackHole 2ch", "MacBook Air Microphone", "WF-1000XM6"])
+        try expectEqual(InputResolver.deviceChoices(devices: devices, current: ""),
+                        ["BlackHole 2ch", "MacBook Air Microphone"])
+        try expectEqual(InputResolver.deviceChoices(devices: [], current: "WF-1000XM6"), ["WF-1000XM6"])
+    }
+
     test("resolvedInputs(for:devices:) matches resolve(...).resolvedInputs") {
         let inputs = InputConfig.defaultInputs
         try expectEqual(
