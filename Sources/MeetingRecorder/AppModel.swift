@@ -291,6 +291,38 @@ final class AppModel: ObservableObject {
         adoptAudio(url, autostart: false)
     }
 
+    // MARK: Pipeline folder
+
+    /// The pipeline directory a run would use (override, bundled copy, or the repo's during
+    /// development), or nil if none is found.
+    var pipelineURL: URL? {
+        pipelineLocator.locate(settings: settings.transcription)
+    }
+
+    /// True when a pipeline folder is set but has no run.sh (the locator then falls back to
+    /// the bundled copy, silently).
+    var pipelineOverrideIsInvalid: Bool {
+        guard let override = settings.transcription.pipelineDirectoryOverride?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty else { return false }
+        let directory = URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        return !pipelineLocator.containsRunScript(directory)
+    }
+
+    func choosePipelineFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose the pipeline folder (the one containing run.sh)"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if let current = settings.transcription.pipelineDirectoryOverride, !current.isEmpty {
+            panel.directoryURL = URL(
+                fileURLWithPath: (current as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settings.transcription.pipelineDirectoryOverride = url.path
+    }
+
     func openTranscript(_ url: URL) {
         NSWorkspace.shared.open(url)
     }
