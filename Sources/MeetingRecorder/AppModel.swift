@@ -32,7 +32,7 @@ final class AppModel: ObservableObject {
 
     /// The audio file the transcription panel is about. A run is tied to the file it was
     /// started for: this only changes while no run is in progress, so a recording that is
-    /// saved mid-run can never take over the panel (it waits in `pendingRecording`).
+    /// saved mid-run can never take over the panel (it waits in `queuedAudio`).
     @Published private(set) var transcriptionTarget: URL?
     /// Where a run for `transcriptionTarget` would write the transcript. Worked out once per
     /// target (and again when something that decides it may have changed), not per render:
@@ -43,11 +43,21 @@ final class AppModel: ObservableObject {
     @Published var guestName = ""
     @Published private(set) var transcriptionStartedAt: Date?
     @Published private(set) var transcriptionFinishedAt: Date?
-    /// A recording saved while a transcription was running; offered once it ends.
-    @Published private(set) var pendingRecording: URL?
+    /// Recordings saved, and files picked with "Transcribe a file…", while a transcription
+    /// was running: offered in this order once it ends. A queue, because several can pile up
+    /// during one long run.
+    @Published private(set) var queuedAudio: [QueuedAudio] = []
     /// The last successful transcript, kept in view when the panel moves on to another
     /// file so a weak-match warning is not lost.
     @Published private(set) var previousTranscript: PreviousTranscript?
+
+    struct QueuedAudio: Equatable {
+        let url: URL
+        /// A recording the app saved (it starts by itself after a successful run when
+        /// auto-transcribe is on), as opposed to a file the user picked, which waits for a
+        /// guest name like any picked file.
+        let isRecording: Bool
+    }
 
     struct PreviousTranscript: Equatable {
         let audioURL: URL
@@ -399,13 +409,27 @@ final class AppModel: ObservableObject {
         }
         panel.directoryURL = settings.outputFolder
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        adoptAudio(url, autostart: false)
+        // The picker is modal but the app keeps running behind it: a recording can have been
+        // saved and auto-started a run meanwhile, and the panel cannot move off that run.
+        if isTranscribing {
+            enqueue(url, isRecording: false)
+        } else {
+            adoptAudio(url, autostart: false)
+        }
     }
 
-    /// Moves a recording that was saved mid-run into the panel (after the run has ended).
-    func transcribePendingRecording() {
-        guard let url = pendingRecording else { return }
-        adoptAudio(url, autostart: false)
+    /// Moves the oldest queued file into the panel (after the run has ended).
+    func transcribeNextQueued() {
+        guard !isTranscribing, let next = queuedAudio.first else { return }
+        adoptAudio(next.url, autostart: false)
+    }
+
+    /// Adds a file to the end of the queue unless it is already waiting or is the file of
+    /// the run in progress.
+    private func enqueue(_ url: URL, isRecording: Bool) {
+        let url = url.standardizedFileURL
+        guard url != transcriptionTarget, !queuedAudio.contains(where: { $0.url == url }) else { return }
+        queuedAudio.append(QueuedAudio(url: url, isRecording: isRecording))
     }
 
     // MARK: Pipeline folder
@@ -446,9 +470,9 @@ final class AppModel: ObservableObject {
 
     private func recordingSaved(_ url: URL) {
         if isTranscribing {
-            pendingRecording = url.standardizedFileURL
+            enqueue(url, isRecording: true)
         } else {
-            pendingRecording = nil  // superseded by this newer recording
+            // The newest recording takes the panel. Older queued files stay queued.
             adoptAudio(url, autostart: settings.transcription.autoTranscribe)
         }
     }
@@ -463,12 +487,14 @@ final class AppModel: ObservableObject {
             }
             refreshTranscriptionOutputDirectory()
         }
-        // A recording that was saved mid-run is transcribed next when auto-transcribe is on,
-        // but only after a successful run: after a cancel or a failure the user decides.
+        // The recording saved first during the run is transcribed next when auto-transcribe is
+        // on, and so on down the queue as each run succeeds; after a cancel or a failure the
+        // user decides. A picked file at the front also stops the chain: it needs a guest name.
         // `state` can be stale after the hop; the controller has the current one.
-        if case .finished = state, case .finished = transcription.state,
-           let next = pendingRecording, settings.transcription.autoTranscribe {
-            adoptAudio(next, autostart: true)
+        if case .finished = state, case .finished = transcription.state, !isQuitting,
+           settings.transcription.autoTranscribe,
+           let next = queuedAudio.first, next.isRecording {
+            adoptAudio(next.url, autostart: true)
         }
     }
 
@@ -485,7 +511,7 @@ final class AppModel: ObservableObject {
         transcriptionStartedAt = nil
         transcriptionFinishedAt = nil
         guestName = ""
-        if pendingRecording == audio { pendingRecording = nil }
+        queuedAudio.removeAll { $0.url == audio }
         if autostart { startTranscription() }
     }
 }

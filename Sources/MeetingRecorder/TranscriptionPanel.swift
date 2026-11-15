@@ -39,7 +39,7 @@ struct TranscriptionPanel: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            pendingRecordingRow
+            queuedAudioRow
             previousTranscriptRow
         }
     }
@@ -238,22 +238,27 @@ struct TranscriptionPanel: View {
             interviewer, result.interviewerSimilarity, guest, result.guestSimilarity)
     }
 
+    /// The oldest queued file, with how many more wait behind it.
     @ViewBuilder
-    private var pendingRecordingRow: some View {
-        if let pending = model.pendingRecording, pending != model.transcriptionTarget {
+    private var queuedAudioRow: some View {
+        if let next = model.queuedAudio.first {
+            let more = model.queuedAudio.count - 1
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.down").foregroundStyle(.secondary)
-                Text("New recording saved: \(model.displayName(for: pending))")
+                Text((next.isRecording ? "New recording saved: " : "Waiting: ")
+                    + model.displayName(for: next.url)
+                    + (more > 0 ? " (+\(more) more)" : ""))
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(model.queuedAudio.map { model.displayName(for: $0.url) }.joined(separator: "\n"))
                 Spacer()
-                Button("Transcribe…") { model.transcribePendingRecording() }
+                Button("Transcribe…") { model.transcribeNextQueued() }
                     .font(.caption)
                     .disabled(model.isTranscribing)
                     .help(model.isTranscribing
                         ? "Available when the current transcription ends"
-                        : "Show this recording in the panel above")
+                        : "Show this file in the panel above")
             }
         }
     }
