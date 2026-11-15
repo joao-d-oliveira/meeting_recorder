@@ -42,7 +42,6 @@ private func processIsAlive(_ pid: pid_t) -> Bool {
 private let pythonStub = #"""
 #!/bin/sh
 here="$(cd "$(dirname "$0")" && pwd)"
-if [ "$1" = "-c" ] && [ -n "$3" ]; then printf '%s\n' "$3" | tr 'A-Z' 'a-z'; exit 0; fi  # this revision's run.sh asks python to lower-case the interviewer
 if [ "$1" = "-c" ]; then
   echo "$2" >> "$STUB_STATE/import-check.log"
   [ -f "$here/../installed" ] && [ "${STUB_IMPORTS_OK:-1}" = 1 ]
@@ -258,9 +257,9 @@ private func processID(in file: URL) -> pid_t? {
 
 func runPipelineRobustnessTests() {
     runCancelTests()
-    runSetupTests()
     runEnvironmentTests()
     runOverlappingRunTests()
+    runInterviewerTests()
     runCacheContentsTests()
 }
 
@@ -310,9 +309,7 @@ private func runCancelTests() {
         // The finished conversion is kept, so a retry doesn't redo it.
         try expectEqual(sandbox.sharedWavs.count, 1)
     }
-}
 
-private func runSetupTests() {
     test("cancel during setup: run.sh exits promptly, uv is stopped, and the next run runs setup again") {
         let sandbox = Sandbox(venv: .none); defer { sandbox.remove() }
         let audio = sandbox.audio("a")
@@ -488,6 +485,62 @@ private func runOverlappingRunTests() {
         try expect(wavs.allSatisfy { $0.hasSuffix(".use.wav") }, "diarize should get a run-private name: \(wavs)")
         try expectEqual(Set(wavs).count, 2)
         try expectEqual(sandbox.useLinks, [])
+    }
+}
+
+private func runInterviewerTests() {
+    test("INTERVIEWER values that could leave the cache folder or hide the file are rejected up front") {
+        let names = ["x/../../evil", "../up", "/abs", ".hidden", "..", "back\\slash", "line\nbreak", "tab\tname", "   "]
+        for name in names {
+            let sandbox = Sandbox(venv: .none); defer { sandbox.remove() }
+            let first = sandbox.audio("a"), second = sandbox.audio("b")
+            // Two recordings: the only case in which the pipeline would write a voiceprint.
+            let result = try run(
+                sandbox, [sandbox.out.path, "Dana:\(first.path)", "Eve:\(second.path)"],
+                environment: ["INTERVIEWER": name])
+            try expectEqual(result.status, 1)
+            try expect(result.stderr.joined().contains("Invalid INTERVIEWER"), "\(name.debugDescription): \(result.stderr)")
+            try expectEqual(sandbox.log("uv.log"), [])  // before any setup
+            try expectEqual(sandbox.log("ffmpeg.log"), [])
+            try expectEqual(sandbox.log("diarize.args"), [])
+            try expect(!FileManager.default.fileExists(atPath: sandbox.home.appendingPathComponent(".cache/evil.npy").path))
+            try expect(!FileManager.default.fileExists(atPath: sandbox.out.path), "created the output folder")
+        }
+    }
+
+    test("ordinary INTERVIEWER names, including non-ASCII ones, find their lower-cased voiceprint") {
+        // The script's locale is C (no LANG), as for an app started from Finder.
+        for (name, file) in [("Ana María", "ana maría"), ("Élodie", "élodie"), ("JOAO", "joao"), ("O'Brien-Smith", "o'brien-smith")] {
+            let sandbox = Sandbox(voiceprints: [file]); defer { sandbox.remove() }
+            let audio = sandbox.audio("a")
+            let result = try run(sandbox, [sandbox.out.path, "Dana:\(audio.path)"], environment: ["INTERVIEWER": name])
+            try expectEqual(result.status, 0)
+            try expect(result.stderr.isEmpty, "\(name): \(result.stderr)")
+            try expect(sandbox.log("diarize.args").joined().hasSuffix("--interviewer \(name)"), "\(sandbox.log("diarize.args"))")
+        }
+    }
+
+    test("no voiceprint and one recording fails before any setup, without needing the venv") {
+        let sandbox = Sandbox(venv: .none, voiceprints: []); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let result = try run(sandbox, [sandbox.out.path, "Dana:\(audio.path)"], environment: ["INTERVIEWER": "Zed"])
+        try expectEqual(result.status, 1)
+        try expect(
+            result.stderr.joined().contains("No voiceprint at \(sandbox.cache.path)/voiceprint-zed.npy and only one recording"),
+            "\(result.stderr)")
+        try expectEqual(result.stages, [])
+        try expectEqual(sandbox.log("uv.log"), [])
+        try expect(!sandbox.venvPythonExists)
+        try expectEqual(sandbox.log("ffmpeg.log"), [])
+    }
+
+    test("REFRESH_VOICEPRINT with one recording also fails before any setup") {
+        let sandbox = Sandbox(venv: .none); defer { sandbox.remove() }
+        let audio = sandbox.audio("a")
+        let result = try run(sandbox, [sandbox.out.path, "Dana:\(audio.path)"], environment: ["REFRESH_VOICEPRINT": "1"])
+        try expectEqual(result.status, 1)
+        try expect(result.stderr.joined().contains("only one recording"), "\(result.stderr)")
+        try expectEqual(sandbox.log("uv.log"), [])
     }
 }
 

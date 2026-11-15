@@ -185,6 +185,16 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
+def require_in_cache(path):
+    """The default voiceprint path is built from the interviewer's name. A name such as
+    'x/../../evil' would make it point (and np.save write) outside the cache folder, so
+    refuse any default path whose folder is not the cache folder itself. An explicit
+    --voiceprint path is the caller's own choice and is not checked."""
+    if path.parent.resolve() != CACHE.resolve():
+        raise SystemExit(f"Refusing to use the voiceprint path {path}: it is outside {CACHE}. "
+                         "The interviewer name must not contain '/' or '..'.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out_dir")
@@ -197,6 +207,8 @@ def main():
     a = ap.parse_args()
 
     vp_path = Path(a.voiceprint) if a.voiceprint else CACHE / f"voiceprint-{a.interviewer.lower()}.npy"
+    if not a.voiceprint:
+        require_in_cache(vp_path)
     specs = [s.split(":") for s in a.specs]
     for s in specs:
         if len(s) != 3:

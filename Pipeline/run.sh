@@ -68,6 +68,16 @@ short_hash() {
   fi
 }
 
+# Lower-cases $1 the way Python's str.lower() does for the names that matter (diarize.py names
+# the voiceprint file with it), without needing the venv. A Finder-launched app has no UTF-8
+# locale, and tr in the C locale would leave "Élodie" as "Élodie"; hence the explicit one.
+lower() {
+  local out
+  out="$(printf '%s' "$1" | LC_ALL=en_US.UTF-8 tr '[:upper:]' '[:lower:]' 2>/dev/null)" ||
+    out="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  printf '%s' "$out"
+}
+
 # Cache key for a recording: <guest>-<basename>-<hash of absolute path|size|mtime>.
 # Same file, same key (re-runs hit the cache); a different file or an edited file gets
 # a new key. /usr/bin/stat is the BSD one even when GNU coreutils precede it in PATH.
@@ -158,8 +168,26 @@ run_step() {
 OUT="$1"; shift
 INTERVIEWER="${INTERVIEWER:-Joao}"
 
+# The name ends up in a file name (voiceprint-<name>.npy in the cache), so it must not be able
+# to climb out of the cache folder or hide the file.
+case "$INTERVIEWER" in
+  .*|*/*|*\\*|*[[:cntrl:]]*)
+    die "Invalid INTERVIEWER: the name must not start with '.' or contain '/', '\\' or control characters" ;;
+esac
+[ -n "${INTERVIEWER//[[:space:]]/}" ] || die "Invalid INTERVIEWER: the name is empty"
+
 # Validate every spec before doing any slow work.
 for spec in "$@"; do parse_spec "$spec"; done
+command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found: brew install ffmpeg"
+
+# Fail fast: without a saved voiceprint (or with a refresh requested) the interviewer is
+# found by comparing 2+ recordings. Discovering that after transcribing, or after downloading
+# a few GB of Python packages, wastes minutes. This must not depend on the venv (lower() does not).
+VOICEPRINT="$CACHE/voiceprint-$(lower "$INTERVIEWER").npy"
+if { [ ! -f "$VOICEPRINT" ] || [ -n "${REFRESH_VOICEPRINT:-}" ]; } && [ "$#" -lt 2 ]; then
+  die "No voiceprint at $VOICEPRINT and only one recording. Pass 2+ recordings that share the interviewer (this builds the voiceprint)."
+fi
+
 # setup.sh creates $READY as its final step. bin/python exists as soon as `uv venv` has run,
 # long before the packages are installed, so it alone proves nothing: a cancelled or failed
 # install would otherwise look like a working environment and fail later with
@@ -179,15 +207,6 @@ if ! environment_ready; then
   echo "STAGE: setup"
   echo "Setting up the transcription environment (one-time; downloads a few GB)"
   run_step "$HERE/setup.sh" || die "Setup of the transcription environment failed"
-fi
-command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found: brew install ffmpeg"
-
-# Fail fast: without a saved voiceprint (or with a refresh requested) the interviewer is
-# found by comparing 2+ recordings. Discovering that after transcribing wastes minutes.
-vp_name="$("$PY" -c 'import sys; print(sys.argv[1].lower())' "$INTERVIEWER")"
-VOICEPRINT="$CACHE/voiceprint-$vp_name.npy"
-if { [ ! -f "$VOICEPRINT" ] || [ -n "${REFRESH_VOICEPRINT:-}" ]; } && [ "$#" -lt 2 ]; then
-  die "No voiceprint at $VOICEPRINT and only one recording. Pass 2+ recordings that share the interviewer (this builds the voiceprint)."
 fi
 
 # Writes $2 (the cached WAV) from the audio $1 through a part file that is renamed into place

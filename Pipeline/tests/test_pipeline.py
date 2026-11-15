@@ -5,9 +5,10 @@ Run with the pipeline's own interpreter (it has numpy/torch/speechbrain installe
     ~/.cache/diarize/.venv/bin/python -I Pipeline/tests/test_pipeline.py
 
 Covers: the summary.json writer, that the .md output is byte-identical to the original
-skill's diarize.py for the same input, and the transcribe.py progress hook and part-file
-argument. Uses fabricated data and a temp directory only; no model is loaded and nothing is
-written to the user's cache.
+skill's diarize.py for the same input, where diarize.py may write the voiceprint, and the
+transcribe.py progress hook and part-file argument. Uses fabricated data and a temp
+directory only; no model is loaded and nothing is written to the user's cache (the tests
+that run main() without --voiceprint point diarize.CACHE at a temp directory first).
 """
 import contextlib
 import importlib.util
@@ -60,6 +61,25 @@ def run_main(module, out_dir, voiceprint_path, interviewer="Joao"):
     finally:
         sys.argv = argv
     return out.getvalue()
+
+
+def run_main_default_voiceprint(module, out_dir, guests, interviewer="Joao"):
+    """Runs module.main() without --voiceprint (so the default path inside module.CACHE is
+    used) on one fabricated recording per guest. Returns the printed output."""
+    module.process = lambda guest, wav, words_json: fabricated_recording(guest)
+    argv = sys.argv
+    sys.argv = ["diarize.py", str(out_dir), *[f"{g}:x.wav:x.json" for g in guests],
+                "--interviewer", interviewer]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            module.main()
+    finally:
+        sys.argv = argv
+    return out.getvalue()
+
+
+def tree(root):
+    return sorted(str(p.relative_to(root)) for p in Path(root).rglob("*"))
 
 
 class SummaryTests(unittest.TestCase):
@@ -129,6 +149,80 @@ class SummaryTests(unittest.TestCase):
         run_main(self.diarize, self.dir / "out", self.vp)
         self.assertEqual(sorted(p.name for p in (self.dir / "out").iterdir()),
                          ["Fab_Transcript.md", "Fab_Transcript.summary.json"])
+
+
+class DefaultVoiceprintPathTests(unittest.TestCase):
+    """The default voiceprint path (~/.cache/diarize/voiceprint-<interviewer>.npy) is only
+    ever written from 2+ recordings, and never outside the cache folder."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.cache = self.root / "home/.cache/diarize"
+        self.cache.mkdir(parents=True)
+        self.out = self.root / "out"
+        self.diarize = load("vendored_diarize_vp", PIPELINE / "diarize.py")
+        self.diarize.CACHE = self.cache  # never the real ~/.cache/diarize
+        self.assertNotEqual(self.diarize.CACHE, Path.home() / ".cache/diarize")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_one_recording_without_a_voiceprint_fails_and_writes_nothing(self):
+        before = tree(self.root)
+        with self.assertRaises(SystemExit) as caught:
+            run_main_default_voiceprint(self.diarize, self.out, ["Solo"])
+        message = str(caught.exception)
+        self.assertIn("No voiceprint at", message)
+        self.assertIn(str(self.cache / "voiceprint-joao.npy"), message)
+        self.assertIn("only one recording", message)
+        self.assertEqual(tree(self.root), before)  # no voiceprint, no output folder, no transcript
+
+    def test_two_recordings_save_the_voiceprint_in_the_cache_folder(self):
+        run_main_default_voiceprint(self.diarize, self.out, ["A", "B"], interviewer="Maria")
+        saved = self.cache / "voiceprint-maria.npy"
+        self.assertTrue(saved.exists())
+        self.assertAlmostEqual(float(np.linalg.norm(np.load(saved))), 1.0, places=5)
+        self.assertEqual(sorted(p.name for p in self.cache.iterdir()), ["voiceprint-maria.npy"])
+
+    def test_saved_voiceprint_is_used_by_a_later_single_recording_run(self):
+        run_main_default_voiceprint(self.diarize, self.out, ["A", "B"])
+        out = run_main_default_voiceprint(self.diarize, self.out, ["Solo"])
+        summary = json.loads((self.out / "Solo_Transcript.summary.json").read_text())
+        self.assertEqual(summary["identification_method"], "voiceprint")
+        self.assertIn("wrote", out)
+
+    def test_a_hostile_interviewer_name_cannot_write_outside_the_cache(self):
+        for name in ["x/../../evil", "../evil", "a/b", "/abs/evil", "../../../../tmp/evil"]:
+            with self.subTest(name=name):
+                before = tree(self.root)
+                with self.assertRaises(SystemExit) as caught:
+                    run_main_default_voiceprint(self.diarize, self.out, ["A", "B"], interviewer=name)
+                self.assertIn("outside", str(caught.exception))
+                self.assertEqual(tree(self.root), before)  # nothing saved, no directory created
+
+    def test_the_check_applies_to_reading_too(self):
+        # A name that escapes the cache is refused even when there is a file to load there.
+        (self.root / "home/.cache").mkdir(exist_ok=True)
+        np.save(self.root / "home/.cache/evil.npy", np.ones(8, dtype=np.float32))
+        with self.assertRaises(SystemExit) as caught:
+            run_main_default_voiceprint(self.diarize, self.out, ["Solo"], interviewer="x/../../evil")
+        self.assertIn("outside", str(caught.exception))
+
+    def test_an_explicit_voiceprint_path_is_the_callers_choice(self):
+        elsewhere = self.root / "elsewhere/vp.npy"
+        elsewhere.parent.mkdir()
+        self.diarize.process = lambda guest, wav, words_json: fabricated_recording(guest)
+        argv = sys.argv
+        sys.argv = ["diarize.py", str(self.out), "A:x.wav:x.json", "B:x.wav:x.json",
+                    "--interviewer", "Joao", "--voiceprint", str(elsewhere)]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.diarize.main()
+        finally:
+            sys.argv = argv
+        self.assertTrue(elsewhere.exists())
+        self.assertEqual(list(self.cache.iterdir()), [])
 
 
 class ProgressHookTests(unittest.TestCase):
