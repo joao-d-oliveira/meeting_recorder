@@ -18,6 +18,20 @@ public struct InputConfig: Codable, Equatable, Identifiable {
         self.skipIfMissing = skipIfMissing
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id, deviceName, gain, skipIfMissing
+    }
+
+    /// Per-field tolerant: a missing or malformed field takes its default instead of failing
+    /// the whole input (an empty device name is then reported by preflight).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? container.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
+        deviceName = (try? container.decodeIfPresent(String.self, forKey: .deviceName)) ?? ""
+        gain = (try? container.decodeIfPresent(Double.self, forKey: .gain)) ?? 1.0
+        skipIfMissing = (try? container.decodeIfPresent(Bool.self, forKey: .skipIfMissing)) ?? false
+    }
+
     /// Mirrors ~/.claude/skills/interview-transcribe/scripts/record-meeting.sh:
     /// earbuds + BlackHole 2ch at 0.55, MacBook Air mic at 1.00.
     public static let defaultInputs: [InputConfig] = [
