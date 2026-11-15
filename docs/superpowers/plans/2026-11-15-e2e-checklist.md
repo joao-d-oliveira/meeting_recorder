@@ -95,7 +95,7 @@ The **Transcription** section sits at the bottom of the main window. Its first l
 - [ ] Two recordings, same guest name, separate folders: transcribe a second, different recording with the same guest name.
   Expected: the second transcript is for the second recording (different content/timestamps), not a stale copy of the first, and it is written in the second recording's folder.
 - [ ] **Transcribe a file…**: click it (top right of the section), pick an older `.flac` (or a `.wav`/`.m4a`/`.mp3`), enter a guest name, **Transcribe**.
-  Expected: the file picker offers only audio files; the section switches to the chosen file's `<folder>/<name>`; the transcript is written in that file's folder. The button is disabled while a transcription runs.
+  Expected: the file picker offers only audio files; the section switches to the chosen file's `<folder>/<name>`; the transcript is written in that file's folder, or in `<name> transcript/` beside it if the folder holds other audio files (the panel says so under the guest field). The button is disabled while a transcription runs.
 - [ ] Auto-transcribe: enable *Transcribe automatically after recording* in Settings, record 20-30 s, stop.
   Expected: transcription starts on its own after "Saved" (running view straight away), using the default guest name ("Guest_Transcript.md"). Disable it again afterwards.
 
@@ -118,7 +118,7 @@ The **Transcription** section sits at the bottom of the main window. Its first l
 ### Failure path
 
 - [ ] `mv ~/.cache/diarize/voiceprint-<name>.npy ~/.cache/diarize/voiceprint-<name>.npy.bak`, then Transcribe a recording.
-  Expected: a red error mentioning the missing voiceprint (and that passing 2+ recordings builds it), a collapsed "Pipeline output" disclosure with the last lines of the log, and a **Retry** button next to the guest-name field; not a hang or a raw stack trace alone. No transcript file is produced.
+  Expected: a red error mentioning the missing voiceprint, wrapped over as many lines as it needs and fully readable (no "..." truncation), and a **Retry** button next to the guest-name field; not a hang or a raw stack trace alone. If the failure came from the running pipeline (not an immediate refusal), a collapsed "Pipeline output" disclosure with the last log lines is there too. No transcript file is produced.
 - [ ] **Rename it back:** `mv ~/.cache/diarize/voiceprint-<name>.npy.bak ~/.cache/diarize/voiceprint-<name>.npy`, then confirm with `ls ~/.cache/diarize/voiceprint-*`, and click **Retry**.
   Expected: the file is back under its original name and the transcription completes.
 - [ ] Launch the app from Finder or `open build/MeetingRecorder.app` (not `swift run`) and Transcribe a recording.

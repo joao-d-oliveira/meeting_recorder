@@ -100,12 +100,13 @@ will be used, or a red "Pipeline not found".
   `~/.cache/diarize`, so there is no second setup.
 - First run downloads the models and sets up the environment, which takes a
   while. After that expect roughly 1-2 minutes per 10 minutes of audio.
-- Output, in the audio file's own folder: `<Guest>_Transcript.md` and
-  `<Guest>_Transcript.summary.json` (turns, duration, speaking time per speaker,
-  how the interviewer was identified, weak-match flag, count of uncertain `(?)`
-  turns). A transcript with the same guest name in that folder is replaced; the panel
-  warns before you start. (With "Create one folder per recording" off, all recordings
-  share a folder, so use different guest names.)
+- Output: `<Guest>_Transcript.md` and `<Guest>_Transcript.summary.json` (turns,
+  duration, speaking time per speaker, how the interviewer was identified, weak-match
+  flag, count of uncertain `(?)` turns). They go in the audio file's own folder, or, if
+  that folder holds other audio files (flac, wav, m4a, mp3), in a `<audio name>
+  transcript/` folder next to the audio; the panel says so before you start. A
+  transcript with the same guest name in the output folder is replaced, and the panel
+  warns about that too.
 - The text is raw Whisper output: proper names are often misspelled and words at a
   speaker change can land in the neighbouring turn. Check the first turns, and the
   `(?)` ones, against the audio.

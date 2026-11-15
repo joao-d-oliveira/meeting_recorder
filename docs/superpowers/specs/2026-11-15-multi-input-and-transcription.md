@@ -70,14 +70,17 @@ Goal: the app records exactly what the script records, and can produce the same 
   so a run is always tied to the file it was started for.
   - A saved recording becomes the target and gets a guest-name field (placeholder = default guest name) and
     **Transcribe**; with `autoTranscribe` it starts at once with the default guest name. **Transcribe a file…**
-    (`NSOpenPanel`, flac/wav/m4a/mp3) targets any existing file. The output directory is that file's folder.
+    (`NSOpenPanel`, flac/wav/m4a/mp3) targets any existing file. The output directory is whatever
+    `TranscriptionRequest` defaults to (the audio's folder, or `<audio name> transcript/` beside it when that folder
+    holds other audio files); the panel reads it back from the request, notes it when it is not the audio's folder,
+    and uses it for the overwrite warning.
   - Running: stage title, a determinate bar while `progress` is non-nil (transcribe stage) and an indeterminate
     one otherwise, elapsed time, **Cancel** (reads "Cancelling…" and is disabled while `isCancelling`).
   - Finished: turns, duration, speaking minutes per person, identification (voiceprint scores by role, or the
     pipeline's own text for cross-file), `(?)` count, time taken, an orange "Weak voice match — check the labels
     by reading the first turns" warning when `weakMatch`, **Open transcript** (`NSWorkspace.open`),
-    **Show in Finder**, **Transcribe again…** (back to the guest field). Failed: message, "Pipeline output"
-    disclosure with the log tail, guest field with **Retry**. Cancelled: note, guest field with
+    **Show in Finder**, **Transcribe again…** (back to the guest field). Failed: message (wraps to as many lines as
+    needed), "Pipeline output" disclosure with the log tail when there is one, guest field with **Retry**. Cancelled: note, guest field with
     **Transcribe again**. An existing `<Guest>_Transcript.md` that a new run would replace is flagged before
     starting.
   - Recording and transcribing are independent. A recording saved during a run is not shown in place of it: it
