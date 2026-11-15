@@ -6,10 +6,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            deviceSection
-            Divider()
-            volumeSection
-            meterSection
+            inputsSection
             Divider()
             outputSection
             Divider()
@@ -17,7 +14,7 @@ struct ContentView: View {
             statusSection
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 500)
         .fileImporter(isPresented: $model.showFolderPicker, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 model.settings.outputFolder = url
@@ -29,10 +26,10 @@ struct ContentView: View {
         }
     }
 
-    private var deviceSection: some View {
+    private var inputsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Audio Sources").font(.headline)
+                Text("Audio Inputs").font(.headline)
                 Spacer()
                 Button {
                     model.refreshDevices()
@@ -48,49 +45,82 @@ struct ContentView: View {
                 }
                 .help("Settings")
             }
-            Picker("Remote audio", selection: $model.settings.remoteDeviceName) {
-                Text("Select…").tag(String?.none)
-                ForEach(model.devices) { device in
-                    Text(device.name).tag(Optional(device.name))
-                }
+            if model.settings.inputs.isEmpty {
+                Text("No inputs. Add one to record.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .disabled(model.isRecording)
-            Picker("Microphone", selection: $model.settings.micDeviceName) {
-                Text("Select…").tag(String?.none)
-                ForEach(model.devices) { device in
-                    Text(device.name).tag(Optional(device.name))
-                }
+            ForEach(model.settings.inputs) { input in
+                inputRow(input)
             }
-            .disabled(model.isRecording)
+            HStack {
+                Button {
+                    model.addInput()
+                } label: {
+                    Label("Add input", systemImage: "plus")
+                }
+                .disabled(!model.canEditInputs)
+                Spacer()
+                Button("Reset to defaults") { model.resetInputsToDefaults() }
+                    .disabled(!model.canEditInputs)
+                    .help("Earbuds + BlackHole 2ch + MacBook microphone, like record-meeting.sh")
+            }
         }
     }
 
-    private var volumeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Levels").font(.headline)
+    private func inputRow(_ input: InputConfig) -> some View {
+        let id = input.id
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Remote").frame(width: 56, alignment: .leading).font(.caption)
-                Slider(value: $model.settings.remoteVolume, in: 0...1.5)
-                Text("\(Int(model.settings.remoteVolume * 100))%")
+                Picker("Device", selection: model.deviceNameBinding(for: id)) {
+                    if input.deviceName.isEmpty {
+                        Text("Select…").tag("")
+                    }
+                    ForEach(model.deviceChoices(for: input.deviceName), id: \.self) { name in
+                        Text(model.isDeviceConnected(name) ? name : "\(name) (not connected)").tag(name)
+                    }
+                }
+                .labelsHidden()
+                .disabled(!model.canEditInputs)
+                Button {
+                    model.removeInput(id: id)
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove this input")
+                .disabled(!model.canEditInputs)
+            }
+            HStack {
+                Text("Gain").font(.caption).frame(width: 56, alignment: .leading)
+                Slider(value: model.gainBinding(for: id), in: 0...1.5)
+                Text(String(format: "%.2f", input.gain))
                     .font(.caption.monospacedDigit())
                     .frame(width: 40, alignment: .trailing)
             }
+            .disabled(!model.canEditInputs)
             HStack {
-                Text("Mic").frame(width: 56, alignment: .leading).font(.caption)
-                Slider(value: $model.settings.micVolume, in: 0...1.5)
-                Text("\(Int(model.settings.micVolume * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 40, alignment: .trailing)
+                Toggle("Skip if missing", isOn: model.skipIfMissingBinding(for: id))
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .disabled(!model.canEditInputs)
+                Spacer()
             }
+            inputMeter(for: id)
         }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.1)))
     }
 
     @ViewBuilder
-    private var meterSection: some View {
+    private func inputMeter(for id: UUID) -> some View {
         if model.isRecording {
-            VStack(alignment: .leading, spacing: 6) {
-                LevelMeterView(label: "Remote", levelDB: model.controller.remoteLevelDB)
-                LevelMeterView(label: "Mic", levelDB: model.controller.micLevelDB)
+            if let level = model.levelDB(forInput: id) {
+                LevelMeterView(levelDB: level)
+            } else {
+                Text("Skipped: device not connected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -187,6 +217,11 @@ struct ContentView: View {
         ForEach(Array(model.issues.enumerated()), id: \.offset) { _, issue in
             Label(issue.description, systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
+                .font(.caption)
+        }
+        ForEach(Array(model.notices.enumerated()), id: \.offset) { _, notice in
+            Label(notice.description, systemImage: "info.circle")
+                .foregroundStyle(.secondary)
                 .font(.caption)
         }
     }

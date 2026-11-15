@@ -9,7 +9,13 @@ final class AppModel: ObservableObject {
     @Published var settings: RecordingSettings {
         didSet { store.save(settings) }
     }
+    /// Problems that blocked the last Start attempt.
     @Published var issues: [PreflightIssue] = []
+    /// Non-blocking messages from the last Start attempt (e.g. skipped devices).
+    @Published var notices: [PreflightNotice] = []
+    /// Ids of the inputs in the running (or last) recording, in level-meter order:
+    /// position here is the index into `controller.levelsDB`.
+    @Published private(set) var recordedInputIDs: [UUID] = []
     @Published var showSettingsSheet = false
     @Published var showFolderPicker = false
 
@@ -53,6 +59,7 @@ final class AppModel: ObservableObject {
 
     func startRecording() {
         issues = []
+        notices = []
         refreshDevices()
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .notDetermined:
@@ -68,29 +75,95 @@ final class AppModel: ObservableObject {
 
     private func beginRecording(micAuthorized: Bool) {
         let path = ffmpegPath
-        let found = PreflightValidator.validate(
+        let result = PreflightValidator.validate(
             settings: settings, availableDevices: devices,
             ffmpegPath: path, micAuthorized: micAuthorized)
-        guard found.isEmpty,
-              let path,
-              let remote = devices.first(where: { $0.name == settings.remoteDeviceName }),
-              let mic = devices.first(where: { $0.name == settings.micDeviceName })
-        else {
-            issues = found
+        notices = result.notices
+        guard result.canStart, let path else {
+            issues = result.issues
             return
         }
+        issues = []
+        recordedInputIDs = result.inputs.recorded.map(\.config.id)
 
         let outputURL = OutputLocation.makeURL(settings: settings, date: Date())
         try? FileManager.default.createDirectory(
             at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let resolved = result.resolvedInputs
         let arguments = CommandBuilder.arguments(
-            remoteIndex: remote.index, micIndex: mic.index,
-            settings: settings, outputURL: outputURL)
-        controller.start(ffmpegPath: path, arguments: arguments, outputURL: outputURL)
+            inputs: resolved, settings: settings, outputURL: outputURL)
+        controller.start(
+            ffmpegPath: path, arguments: arguments, outputURL: outputURL, inputCount: resolved.count)
     }
 
     func stopRecording() {
         controller.stop()
+    }
+
+    // MARK: - Inputs
+
+    /// Inputs can't change under a running recording: the ffmpeg command is already fixed.
+    var canEditInputs: Bool { !isRecording }
+
+    func isDeviceConnected(_ name: String) -> Bool {
+        devices.contains { $0.name == name }
+    }
+
+    /// Names offered by an input's device picker: every scanned device, plus the saved
+    /// name when it isn't connected right now so the selection stays visible.
+    func deviceChoices(for current: String) -> [String] {
+        var names = devices.map(\.name)
+        if !current.isEmpty, !names.contains(current) { names.append(current) }
+        return names
+    }
+
+    func addInput() {
+        guard canEditInputs else { return }
+        let used = Set(settings.inputs.map(\.deviceName))
+        let name = devices.first { !used.contains($0.name) }?.name ?? ""
+        settings.inputs.append(InputConfig(deviceName: name, gain: 1.0))
+    }
+
+    func removeInput(id: UUID) {
+        guard canEditInputs else { return }
+        settings.inputs.removeAll { $0.id == id }
+    }
+
+    func resetInputsToDefaults() {
+        guard canEditInputs else { return }
+        settings.inputs = InputConfig.defaultInputs
+    }
+
+    func deviceNameBinding(for id: UUID) -> Binding<String> {
+        Binding(
+            get: { self.settings.inputs.first { $0.id == id }?.deviceName ?? "" },
+            set: { newValue in self.updateInput(id) { $0.deviceName = newValue } })
+    }
+
+    func gainBinding(for id: UUID) -> Binding<Double> {
+        Binding(
+            get: { self.settings.inputs.first { $0.id == id }?.gain ?? 1.0 },
+            set: { newValue in self.updateInput(id) { $0.gain = newValue } })
+    }
+
+    func skipIfMissingBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { self.settings.inputs.first { $0.id == id }?.skipIfMissing ?? false },
+            set: { newValue in self.updateInput(id) { $0.skipIfMissing = newValue } })
+    }
+
+    private func updateInput(_ id: UUID, _ change: (inout InputConfig) -> Void) {
+        // Looked up by id on every write: rows can be removed while a binding is alive.
+        guard canEditInputs, let index = settings.inputs.firstIndex(where: { $0.id == id }) else { return }
+        change(&settings.inputs[index])
+    }
+
+    /// Live level of an input in the current recording; nil if it isn't being recorded
+    /// (not started yet, or skipped because its device is missing).
+    func levelDB(forInput id: UUID) -> Double? {
+        guard let position = recordedInputIDs.firstIndex(of: id),
+              controller.levelsDB.indices.contains(position) else { return nil }
+        return controller.levelsDB[position]
     }
 
     func revealInFinder(_ url: URL) {

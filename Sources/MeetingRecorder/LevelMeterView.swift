@@ -1,7 +1,8 @@
 import SwiftUI
 
 struct LevelMeterView: View {
-    let label: String
+    /// Shown to the left of the bar; nil for a bare bar (e.g. inside an input row).
+    var label: String? = nil
     let levelDB: Double
 
     // Map -60 dB...0 dB onto 0...1.
@@ -17,9 +18,11 @@ struct LevelMeterView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(label)
-                .font(.caption)
-                .frame(width: 56, alignment: .leading)
+            if let label {
+                Text(label)
+                    .font(.caption)
+                    .frame(width: 56, alignment: .leading)
+            }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
