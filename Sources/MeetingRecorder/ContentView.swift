@@ -183,6 +183,7 @@ struct ContentView: View {
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
+                .disabled(model.isQuitting)
             }
             if case .recording(let startedAt) = model.controller.state {
                 TimelineView(.periodic(from: startedAt, by: 1)) { context in

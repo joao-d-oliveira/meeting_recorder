@@ -66,15 +66,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // controllers finish their state changes before termination begins.
         stateObserver = Publishers.CombineLatest(model.controller.$state, model.transcription.$state)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] recording, transcription in
-                if case .stopping = recording { return }
-                if case .running = transcription { return }
-                self?.replyToTerminate()
-            }
-        // Only covers a missing exit callback; both controllers escalate to SIGKILL themselves.
+            .sink { [weak self] _, _ in self?.quitStateChanged() }
+        armQuitTimeout(timeout)
+    }
+
+    /// Replies to the pending termination once nothing is left to wait for. Reads the settled
+    /// states (the values the publishers emitted may be stale after the hop).
+    private func quitStateChanged() {
+        switch model.controller.state {
+        case .stopping:
+            return
+        case .recording:
+            // Not expected: nothing can start a recording once the user agreed to quit. But
+            // replying now would orphan ffmpeg and record forever, so stop it and wait again
+            // (ffmpeg is SIGKILLed at 10 s).
+            model.stopRecording()
+            armQuitTimeout(12)
+            return
+        case .idle, .saved, .failed:
+            break
+        }
+        if model.isTranscribing { return }
+        replyToTerminate()
+    }
+
+    /// Only covers a missing exit callback; both controllers escalate to SIGKILL themselves.
+    private func armQuitTimeout(_ seconds: TimeInterval) {
+        quitTimeout?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.replyToTerminate() }
         quitTimeout = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     private func replyToTerminate() {

@@ -47,7 +47,9 @@ final class AppModel: ObservableObject {
     private let locator = FFmpegLocator()
     private let pipelineLocator = PipelineLocator()
     private var cancellables: Set<AnyCancellable> = []
-    private var isQuitting = false
+    /// Set once the user has agreed to quit: from then on nothing may start a recording or a
+    /// pipeline run, because the quit is already waiting on the ones that were running.
+    @Published private(set) var isQuitting = false
 
     var ffmpegPath: String? {
         let expandedOverride = settings.ffmpegPathOverride.map {
@@ -105,7 +107,9 @@ final class AppModel: ObservableObject {
     func startRecording() {
         // A double click (or a click while the first-run permission prompt is up) must not
         // start twice; the controller ignores a second start, but the model would not.
-        guard !isRecording else { return }
+        // While quitting the app only waits for the recording it stops: a new one would be
+        // left running when the quit completes.
+        guard !isQuitting, !isRecording else { return }
         issues = []
         notices = []
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -122,8 +126,9 @@ final class AppModel: ObservableObject {
 
     private func beginRecording(micAuthorized: Bool) {
         // First run: Start was clicked more than once while the permission prompt was open,
-        // so this runs once per click. Only the first may start.
-        guard !isRecording else { return }
+        // so this runs once per click. Only the first may start. The permission answer can
+        // also arrive after the user has agreed to quit.
+        guard !isQuitting, !isRecording else { return }
         // Scan here, not in startRecording: the permission prompt can sit open for a long
         // time, and a device plugged in (or removed) meanwhile would shift the indexes.
         refreshDevices()
@@ -291,7 +296,7 @@ final class AppModel: ObservableObject {
 
     /// "Transcribe a file…": any flac/wav/m4a/mp3, not only a fresh recording.
     func chooseAudioFile() {
-        guard !isTranscribing else { return }
+        guard !isQuitting, !isTranscribing else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose an audio file to transcribe"
         panel.prompt = "Choose"

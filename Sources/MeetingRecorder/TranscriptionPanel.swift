@@ -24,7 +24,7 @@ struct TranscriptionPanel: View {
                 Text("Transcription").font(.headline)
                 Spacer()
                 Button("Transcribe a file…") { model.chooseAudioFile() }
-                    .disabled(model.isTranscribing)
+                    .disabled(model.isTranscribing || model.isQuitting)
                     .help("Transcribe an existing flac, wav, m4a or mp3 file")
             }
             if let audio = model.transcriptionTarget {
@@ -77,6 +77,7 @@ struct TranscriptionPanel: View {
                     .onSubmit { model.startTranscription() }
                 Button(buttonTitle) { model.startTranscription() }
                     .buttonStyle(.borderedProminent)
+                    .disabled(model.isQuitting)
             }
             if let note = model.transcriptOutputNote {
                 Text(note)
