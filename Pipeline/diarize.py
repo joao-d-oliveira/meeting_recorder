@@ -14,10 +14,13 @@ Usage:
   python diarize.py OUT_DIR Guest:audio16k.wav:words.json [Guest2:...]
                     [--interviewer Joao] [--voiceprint PATH] [--refresh-voiceprint]
 
-Writes OUT_DIR/<Guest>_Transcript.md for each recording.
+Writes OUT_DIR/<Guest>_Transcript.md for each recording, plus
+OUT_DIR/<Guest>_Transcript.summary.json (machine-readable facts about the transcript:
+turn count, duration, speaking time, how the interviewer was identified, ...).
 """
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -104,6 +107,9 @@ def process(guest, wav, words_json):
     words = load_words(words_json)
     starts = np.array(speech_windows(words, len(audio) / SR))
     print(f"{guest}: {len(words)} words, {len(starts)} windows", flush=True)
+    if len(starts) < 2:
+        raise SystemExit(f"{guest}: not enough speech to tell voices apart "
+                         f"({len(words)} words, {len(starts)} windows)")
     E = embed(audio, starts)
     km = KMeans(n_clusters=2, n_init=10, random_state=0).fit(E)
     cents = l2n(km.cluster_centers_)
@@ -142,6 +148,43 @@ def ts(t):
     return f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
 
 
+def uncertain(turn):
+    """A turn whose voice match is weak; marked (?) in the transcript."""
+    return bool(np.median(turn["m"]) < 0.05)
+
+
+def build_summary(*, guest, interviewer, transcript_path, tt, words, interviewer_cluster,
+                  talk, scores, method, how, weak_match):
+    """Machine-readable facts about one transcript (see Pipeline/README.md for the schema)."""
+    ic = interviewer_cluster
+    scores = [round(float(x), 4) for x in scores]
+    return {
+        "version": 1,
+        "transcript_path": str(transcript_path),
+        "guest": guest,
+        "interviewer": interviewer,
+        "turn_count": len(tt),
+        "word_count": len(words),
+        "duration_seconds": round(float(words[-1]["end"]), 2) if words else 0.0,
+        "interviewer_speaking_seconds": round(float(talk[ic]), 2),
+        "guest_speaking_seconds": round(float(talk[1 - ic]), 2),
+        "identification_method": method,
+        "identification": how,
+        "interviewer_cluster": int(ic),
+        "similarity_scores": scores,
+        "interviewer_similarity": scores[ic],
+        "guest_similarity": scores[1 - ic],
+        "weak_match": bool(weak_match),
+        "uncertain_turns": sum(1 for t in tt if uncertain(t)),
+    }
+
+
+def write_json_atomic(path, data):
+    tmp = Path(str(path) + ".part")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out_dir")
@@ -167,7 +210,10 @@ def main():
             score = r["cents"] @ vp
             r["joao"] = int(np.argmax(score))
             r["how"] = f"voiceprint similarity {np.round(score, 3)}"
-            if score.max() < 0.5 or abs(score[0] - score[1]) < 0.2:
+            r["method"] = "voiceprint"
+            r["scores"] = score
+            r["weak"] = bool(score.max() < 0.5 or abs(score[0] - score[1]) < 0.2)
+            if r["weak"]:
                 print(f"WARNING {r['guest']}: weak voiceprint match {np.round(score, 3)}; "
                       "check the labels by reading the first few turns", flush=True)
     elif len(res) >= 2:
@@ -176,6 +222,9 @@ def main():
             score = [np.mean([max(r["cents"][c] @ o["cents"].T) for o in others]) for c in (0, 1)]
             r["joao"] = int(np.argmax(score))
             r["how"] = f"cross-file similarity {np.round(score, 3)}"
+            r["method"] = "cross-file"
+            r["scores"] = score
+            r["weak"] = False  # the weak-match rule only applies to voiceprint matching
         vp = l2n(np.mean([r["cents"][r["joao"]] for r in res], axis=0))
         vp_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(vp_path, vp)
@@ -198,11 +247,17 @@ def main():
                  f"{guest} {talk[1 - r['joao']] / 60:.1f} min. "
                  "Turns marked (?) had a weak voice match; check them by ear.\n"]
         for t in tt:
-            flag = " (?)" if np.median(t["m"]) < 0.05 else ""
+            flag = " (?)" if uncertain(t) else ""
             lines.append(f"**[{ts(t['start'])}] {names[t['spk']]}{flag}:** {t['text'].strip()}\n")
         path = out_dir / f"{guest}_Transcript.md"
         path.write_text("\n".join(lines))
         print(f"wrote {path} ({len(tt)} turns)", flush=True)
+        summary_path = out_dir / f"{guest}_Transcript.summary.json"
+        write_json_atomic(summary_path, build_summary(
+            guest=guest, interviewer=a.interviewer, transcript_path=path.absolute(),
+            tt=tt, words=r["words"], interviewer_cluster=r["joao"], talk=talk,
+            scores=r["scores"], method=r["method"], how=r["how"], weak_match=r["weak"]))
+        print(f"wrote {summary_path}", flush=True)
 
 
 if __name__ == "__main__":

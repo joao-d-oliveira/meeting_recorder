@@ -3,6 +3,15 @@
 # Apple Silicon only (mlx-whisper). Needs uv and ffmpeg (brew install uv ffmpeg).
 # Versions are the ones the Saad/Khaled transcripts were produced with.
 set -euo pipefail
+: "${HOME:?HOME is not set}"
+# Apps launched from Finder get a minimal PATH; uv and ffmpeg live in Homebrew or ~/.local/bin.
+for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" /usr/sbin /sbin; do
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) PATH="$PATH:$d" ;;
+  esac
+done
+export PATH
 VENV="$HOME/.cache/diarize/.venv"
 command -v uv >/dev/null || { echo "uv not found: brew install uv" >&2; exit 1; }
 command -v ffmpeg >/dev/null || { echo "ffmpeg not found: brew install ffmpeg" >&2; exit 1; }
