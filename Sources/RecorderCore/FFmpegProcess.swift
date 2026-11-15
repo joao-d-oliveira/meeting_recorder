@@ -33,10 +33,34 @@ struct LineSplitter {
     }
 }
 
+/// A one-way "stop reading" request shared between the thread that decides and the reader
+/// threads that poll it. Set once, never cleared.
+private final class StopFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+
+    var isSet: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopped
+    }
+
+    func set() {
+        lock.lock(); defer { lock.unlock() }
+        stopped = true
+    }
+}
+
 /// Wraps Foundation.Process for a long-running child (the ffmpeg recording, the
 /// transcription pipeline). Delivers onStdoutLine, onStderrLine and onTermination on the
-/// main queue. onTermination is delivered once the process has exited AND every output pipe
-/// has been read to EOF, so it always arrives after the last line.
+/// main queue. onTermination is delivered exactly once, after the process has exited AND every
+/// output pipe has been read to EOF, so it always arrives after the last line.
+///
+/// The one exception is a descendant that inherited the pipes and outlives the process (a
+/// shell script's `sleep`, a daemonized helper): its copy of the write end keeps the pipe from
+/// ever reaching EOF. The readers get `readerGracePeriod` after the process exits; then they
+/// take whatever is already in the pipe, flush any partial line, close their end and stop, and
+/// onTermination follows. Later output from such a descendant is not delivered (its next write
+/// fails with EPIPE/SIGPIPE instead of piling up in a pipe nobody reads).
 public final class FFmpegProcess: ProcessRunning {
     /// stdout is only captured when this is set before `start`; otherwise it goes to /dev/null.
     public var onStdoutLine: ((String) -> Void)?
@@ -51,6 +75,19 @@ public final class FFmpegProcess: ProcessRunning {
     /// `onStderrLine` is never called. Separate pipes are read concurrently, so lines written
     /// close together on the two streams can otherwise be delivered out of order.
     public var mergesStderrIntoStdout = false
+
+    /// How long, after the process has exited, the readers get to reach EOF on their own. In
+    /// the normal case EOF is already there (the process held the only write end), so this only
+    /// bounds the wait when a descendant keeps a pipe open. Read once, at `start`.
+    static let defaultReaderGracePeriod: TimeInterval = 1.5
+    var readerGracePeriod: TimeInterval = FFmpegProcess.defaultReaderGracePeriod
+
+    /// How often an idle reader wakes up to check whether it was told to stop. Data wakes it
+    /// immediately, so this is only the worst-case extra delay of a stop.
+    private static let readerTickMilliseconds: Int32 = 100
+    /// A stopping reader takes what is already in its pipe, but at most this many reads, so a
+    /// descendant that keeps writing cannot hold the stop open.
+    private static let maxReadsAfterStop = 16
 
     private enum Stream { case stdout, stderr }
 
@@ -81,11 +118,17 @@ public final class FFmpegProcess: ProcessRunning {
         process.standardOutput = stdout ?? FileHandle.nullDevice
         process.standardError = stderr ?? stdout!
 
-        // Leaves when the process exits, and once per pipe when its reader reaches EOF.
+        // Leaves when the process exits, and once per pipe when its reader is done (EOF, or told
+        // to stop).
         let finished = DispatchGroup()
         finished.enter()
+        let stop = StopFlag()
+        let grace = readerGracePeriod
         process.terminationHandler = { [weak self] done in
             self?.exitStatus = done.terminationStatus
+            // Readers normally see EOF right away. If a descendant still holds a pipe open they
+            // never will, so after the grace period tell them to stop (a no-op if they are done).
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) { stop.set() }
             finished.leave()
         }
 
@@ -98,10 +141,13 @@ public final class FFmpegProcess: ProcessRunning {
 
         // Readers start after a successful launch: a failed launch leaves nothing to read, and a
         // blocked reader would never see EOF. Output written meanwhile waits in the pipe.
-        if let stderr { startReader(for: stderr, as: .stderr, in: finished) }
-        if let stdout { startReader(for: stdout, as: .stdout, in: finished) }
+        if let stderr { startReader(for: stderr, as: .stderr, in: finished, stop: stop) }
+        if let stdout { startReader(for: stdout, as: .stdout, in: finished, stop: stop) }
         finished.notify(queue: .main) { [weak self] in
             guard let self else { return }
+            // Pipe does not close its write end when it is released, so without this every
+            // process would leak its stdin descriptor. Nothing writes to a finished process.
+            try? self.stdinPipe.fileHandleForWriting.close()
             self.onTermination?(self.exitStatus)
         }
     }
@@ -127,9 +173,14 @@ public final class FFmpegProcess: ProcessRunning {
         kill(pid, SIGKILL)
     }
 
-    /// Reads `pipe` until EOF on its own thread, splitting lines (ffmpeg and tqdm use "\r" for
-    /// in-place progress) and handing each to the main queue in order.
-    private func startReader(for pipe: Pipe, as stream: Stream, in group: DispatchGroup) {
+    /// Reads `pipe` on its own thread until EOF or until `stop` is set, splitting lines (ffmpeg and
+    /// tqdm use "\r" for in-place progress) and handing each to the main queue in order.
+    ///
+    /// The thread waits in poll(2) with a short timeout instead of a blocking read(2): closing a
+    /// file descriptor from another thread does not reliably wake a blocked read on macOS, but a
+    /// poll loop can notice the stop flag within one tick and then close its own descriptor, so
+    /// nothing is closed under a thread that is using it.
+    private func startReader(for pipe: Pipe, as stream: Stream, in group: DispatchGroup, stop: StopFlag) {
         group.enter()
         let handle = pipe.fileHandleForReading
         readerQueue.async { [weak self] in
@@ -142,16 +193,38 @@ public final class FFmpegProcess: ProcessRunning {
                     }
                 }
             }
-            // read(2) directly: FileHandle.read(upToCount:) keeps waiting on a pipe until the
-            // whole count (or EOF) has arrived, which would hold back live lines.
             let fd = handle.fileDescriptor
+            // Non-blocking, so a read can never hang even if poll reported readiness spuriously.
+            // read(2) rather than FileHandle.read(upToCount:), which keeps waiting on a pipe until
+            // the whole count (or EOF) has arrived and would hold back live lines.
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
             var buffer = [UInt8](repeating: 0, count: 65536)
+            var readsAfterStop = 0
             while true {
+                // Sampled before polling: once stopping, poll only for what is already there, so
+                // the last bytes the process wrote are taken before the reader gives up.
+                let stopping = stop.isSet
+                var pollState = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&pollState, 1, stopping ? 0 : Self.readerTickMilliseconds)
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    break
+                }
+                if ready == 0 {
+                    if stopping { break }  // nothing left to take
+                    continue  // idle tick: look at the stop flag again
+                }
                 let count = read(fd, &buffer, buffer.count)
                 if count > 0 {
                     for line in splitter.feed(Data(buffer[0..<count])) { deliver(line) }
-                } else if count == 0 || errno != EINTR {
-                    break  // EOF or a real error
+                    if stopping {
+                        readsAfterStop += 1
+                        if readsAfterStop >= Self.maxReadsAfterStop { break }
+                    }
+                } else if count == 0 {
+                    break  // EOF
+                } else if errno != EINTR && errno != EAGAIN {
+                    break  // a real error
                 }
             }
             if let rest = splitter.flush() { deliver(rest) }

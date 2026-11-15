@@ -73,19 +73,35 @@ func runTranscriptionProcessTests() {
 
     test("lines on both streams are delivered while the process is still running") {
         // The recording's level meters depend on live stderr lines, not output at exit.
+        // The shell's `sleep` is a separate process: killing the shell orphans it, and it keeps
+        // both pipes open for 30 s. Termination must not wait for it.
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("live-lines-\(UUID().uuidString).pid").path
         let process = FFmpegProcess()
+        defer {
+            process.forceKill()
+            killRecordedProcess(at: pidFile)  // never leave the orphaned sleep behind
+            try? FileManager.default.removeItem(atPath: pidFile)
+        }
         var out: [String] = [], err: [String] = []
         var terminated = false
         process.onStdoutLine = { out.append($0) }
         process.onStderrLine = { err.append($0) }
         process.onTermination = { _ in terminated = true }
-        try process.start(executable: "/bin/sh", arguments: ["-c", "echo out1; echo err1 >&2; sleep 30"])
+        // The pid file is written before the first line, so it exists once the lines have arrived.
+        try process.start(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 30 & echo $! > '\(pidFile)'; echo out1; echo err1 >&2; wait"])
         try expect(waitOnMain(timeout: 10) { !out.isEmpty && !err.isEmpty }, "no live output: \(out) \(err)")
         try expect(process.isRunning && !terminated)
         try expectEqual(out, ["out1"])
         try expectEqual(err, ["err1"])
+        let killedAt = Date()
         process.forceKill()
         try expect(waitOnMain(timeout: 10) { terminated }, "process did not terminate")
+        let waited = Date().timeIntervalSince(killedAt)
+        try expect(waited < 6, "termination took \(waited)s after the kill; it waited for the orphaned sleep")
+        try expect(!process.isRunning)
     }
 
     test("merging stderr into stdout keeps the exact order of the output") {
