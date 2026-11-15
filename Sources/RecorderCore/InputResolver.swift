@@ -22,15 +22,20 @@ public struct InputResolution: Equatable {
     public let missing: [InputConfig]
     /// Positions (0-based, in the configured list) of inputs with a blank device name: blocking.
     public let unnamedPositions: [Int]
+    /// Device names chosen by more than one named input, each listed once in order of first
+    /// appearance: blocking, because ffmpeg would open the device twice and mix it in twice.
+    public let duplicateDeviceNames: [String]
 
     public init(
         recorded: [RecordedInput], skipped: [InputConfig],
-        missing: [InputConfig], unnamedPositions: [Int]
+        missing: [InputConfig], unnamedPositions: [Int],
+        duplicateDeviceNames: [String] = []
     ) {
         self.recorded = recorded
         self.skipped = skipped
         self.missing = missing
         self.unnamedPositions = unnamedPositions
+        self.duplicateDeviceNames = duplicateDeviceNames
     }
 
     /// What `CommandBuilder.arguments(inputs:settings:outputURL:)` takes.
@@ -45,11 +50,20 @@ public enum InputResolver {
         var skipped: [InputConfig] = []
         var missing: [InputConfig] = []
         var unnamedPositions: [Int] = []
+        var seenNames: Set<String> = []
+        var duplicateDeviceNames: [String] = []
 
         for (position, input) in inputs.enumerated() {
             if input.deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 unnamedPositions.append(position)
-            } else if let device = devices.first(where: { $0.name == input.deviceName }) {
+                continue
+            }
+            // Same exact-name comparison as the device lookup below.
+            if !seenNames.insert(input.deviceName).inserted,
+               !duplicateDeviceNames.contains(input.deviceName) {
+                duplicateDeviceNames.append(input.deviceName)
+            }
+            if let device = devices.first(where: { $0.name == input.deviceName }) {
                 recorded.append(RecordedInput(
                     config: input,
                     resolved: ResolvedInput(deviceIndex: device.index, gain: input.gain)))
@@ -60,7 +74,8 @@ public enum InputResolver {
             }
         }
         return InputResolution(
-            recorded: recorded, skipped: skipped, missing: missing, unnamedPositions: unnamedPositions)
+            recorded: recorded, skipped: skipped, missing: missing,
+            unnamedPositions: unnamedPositions, duplicateDeviceNames: duplicateDeviceNames)
     }
 
     /// Convenience: just the inputs to hand to the command builder.

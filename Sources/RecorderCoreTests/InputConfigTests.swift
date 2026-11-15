@@ -92,6 +92,31 @@ func runInputConfigTests() {
         try expectEqual(resolution.missing.map(\.deviceName), ["usb mic"])
     }
 
+    test("resolver lists a device chosen by several inputs once, in order of first appearance") {
+        let inputs = [
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 1),
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.5),
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 0.5),
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.5),
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.5),
+            InputConfig(deviceName: "", gain: 1),
+            InputConfig(deviceName: "", gain: 1),
+        ]
+        let resolution = InputResolver.resolve(inputs: inputs, devices: devices)
+        try expectEqual(resolution.duplicateDeviceNames, ["MacBook Air Microphone", "BlackHole 2ch"])
+        // Blank names are "no device", not a shared device.
+        try expectEqual(resolution.unnamedPositions, [5, 6])
+    }
+
+    test("resolver reports no duplicates for distinct names, including different case or spacing") {
+        let inputs = [
+            InputConfig(deviceName: "BlackHole 2ch", gain: 1),
+            InputConfig(deviceName: "blackhole 2ch", gain: 1),
+            InputConfig(deviceName: "BlackHole 2ch ", gain: 1),
+        ]
+        try expectEqual(InputResolver.resolve(inputs: inputs, devices: devices).duplicateDeviceNames, [])
+    }
+
     test("resolvedInputs(for:devices:) matches resolve(...).resolvedInputs") {
         let inputs = InputConfig.defaultInputs
         try expectEqual(

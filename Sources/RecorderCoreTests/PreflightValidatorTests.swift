@@ -78,7 +78,55 @@ func runPreflightValidatorTests() {
         ])
         defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
         let result = validate(settings, devices: devices)
-        try expectEqual(result.issues, [.deviceMissing(name: "Jabra Elite 8 Active")])
+        // The two Jabra rows also trip the duplicate check; the point here is one missing line.
+        try expectEqual(
+            result.issues.filter { $0 == .deviceMissing(name: "Jabra Elite 8 Active") }.count, 1)
+    }
+
+    test("the same device on two inputs blocks Start, reported once per name") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.55),
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 1),
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.55),
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 1),
+            InputConfig(deviceName: "BlackHole 2ch", gain: 0.55),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [
+            .duplicateDevice(name: "BlackHole 2ch"), .duplicateDevice(name: "MacBook Air Microphone"),
+        ])
+        try expect(!result.canStart, "a duplicated device must block Start")
+    }
+
+    test("distinct devices and several blank inputs are not duplicates") {
+        let settings = makeSettings(inputs: [
+            InputConfig(deviceName: "BlackHole 2ch", gain: 1),
+            InputConfig(deviceName: "MacBook Air Microphone", gain: 1),
+            InputConfig(deviceName: "", gain: 1),
+            InputConfig(deviceName: "", gain: 1),
+        ])
+        defer { try? FileManager.default.removeItem(at: settings.outputFolder) }
+        let result = validate(settings, devices: devices)
+        try expectEqual(result.issues, [.inputHasNoDevice(position: 3), .inputHasNoDevice(position: 4)])
+    }
+
+    test("a duplicated device that is also missing reports both problems; skipped twins say only duplicate") {
+        let missingTwice = makeSettings(inputs: [
+            InputConfig(deviceName: "Jabra", gain: 1),
+            InputConfig(deviceName: "Jabra", gain: 1),
+        ])
+        defer { try? FileManager.default.removeItem(at: missingTwice.outputFolder) }
+        try expectEqual(validate(missingTwice, devices: devices).issues, [
+            .duplicateDevice(name: "Jabra"), .deviceMissing(name: "Jabra"),
+        ])
+
+        let skippedTwice = makeSettings(inputs: [
+            InputConfig(deviceName: "Jabra", gain: 1, skipIfMissing: true),
+            InputConfig(deviceName: "Jabra", gain: 1, skipIfMissing: true),
+        ])
+        defer { try? FileManager.default.removeItem(at: skippedTwice.outputFolder) }
+        try expectEqual(validate(skippedTwice, devices: devices).issues, [.duplicateDevice(name: "Jabra")])
     }
 
     test("every input skipped is an issue, and the skipped devices are still listed") {
@@ -121,6 +169,9 @@ func runPreflightValidatorTests() {
                    "device issue should name the device")
         try expect(PreflightIssue.inputHasNoDevice(position: 3).description.contains("3"),
                    "input issue should name the position")
+        let duplicate = PreflightIssue.duplicateDevice(name: "BlackHole 2ch").description
+        try expect(duplicate.contains("BlackHole 2ch") && duplicate.contains("more than one input"),
+                   "duplicate issue should name the device and the problem: \(duplicate)")
         try expect(PreflightNotice.inputSkipped(deviceName: "WF-1000XM6").description.contains("WF-1000XM6"),
                    "notice should name the skipped device")
     }

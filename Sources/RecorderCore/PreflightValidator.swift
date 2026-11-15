@@ -5,6 +5,8 @@ public enum PreflightIssue: Equatable, CustomStringConvertible {
     case noInputs
     /// `position` is 1-based, as shown to the user.
     case inputHasNoDevice(position: Int)
+    /// The same device is selected for more than one input.
+    case duplicateDevice(name: String)
     case deviceMissing(name: String)
     case allInputsSkipped
     case ffmpegNotFound
@@ -17,6 +19,9 @@ public enum PreflightIssue: Equatable, CustomStringConvertible {
             return "Add at least one audio input."
         case .inputHasNoDevice(let position):
             return "Input \(position) has no device selected."
+        case .duplicateDevice(let name):
+            return "Device \"\(name)\" is selected for more than one input, so it would be recorded twice. "
+                + "Pick a different device for each input, or remove the extra one."
         case .deviceMissing(let name):
             return "Device \"\(name)\" is not available. Reconnect it, pick another, or turn on \"Skip if missing\"."
         case .allInputsSkipped:
@@ -83,6 +88,9 @@ public enum PreflightValidator {
         for position in resolution.unnamedPositions {
             issues.append(.inputHasNoDevice(position: position + 1))
         }
+        for name in resolution.duplicateDeviceNames {
+            issues.append(.duplicateDevice(name: name))
+        }
         for input in resolution.missing {
             let issue = PreflightIssue.deviceMissing(name: input.deviceName)
             if !issues.contains(issue) { issues.append(issue) }
@@ -93,7 +101,8 @@ public enum PreflightValidator {
         }
         // Only when every other input problem is absent: otherwise the root cause is above.
         if resolution.recorded.isEmpty, !resolution.skipped.isEmpty,
-           resolution.missing.isEmpty, resolution.unnamedPositions.isEmpty {
+           resolution.missing.isEmpty, resolution.unnamedPositions.isEmpty,
+           resolution.duplicateDeviceNames.isEmpty {
             issues.append(.allInputsSkipped)
         }
 
