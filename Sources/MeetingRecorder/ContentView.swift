@@ -26,6 +26,15 @@ struct ContentView: View {
         }
     }
 
+    /// Height the inputs list may take before it scrolls. Everything else in the window
+    /// (output, controls, status, the transcription panel, padding) needs roughly 600-650 pt,
+    /// so the list gets what is left of the screen, between 150 pt (a bit over one row) and
+    /// 340 pt (all of three inputs, with their meters, and some room).
+    private static var inputsMaxHeight: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
+        return min(340, max(150, screenHeight - 650))
+    }
+
     private var inputsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -45,14 +54,23 @@ struct ContentView: View {
                 }
                 .help("Settings")
             }
-            if model.settings.inputs.isEmpty {
-                Text("No inputs. Add one to record.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            // Scrolls instead of growing the window: the window is sized to its content
+            // (.contentSize), so three inputs plus the transcription panel would otherwise
+            // be taller than a laptop screen.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if model.settings.inputs.isEmpty {
+                        Text("No inputs. Add one to record.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.settings.inputs) { input in
+                        inputRow(input)
+                    }
+                }
             }
-            ForEach(model.settings.inputs) { input in
-                inputRow(input)
-            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: Self.inputsMaxHeight)
             HStack {
                 Button {
                     model.addInput()
@@ -91,21 +109,17 @@ struct ContentView: View {
                 .help("Remove this input")
                 .disabled(!model.canEditInputs)
             }
-            HStack {
-                Text("Gain").font(.caption).frame(width: 56, alignment: .leading)
+            HStack(spacing: 8) {
+                Text("Gain").font(.caption)
                 Slider(value: model.gainBinding(for: id), in: 0...1.5)
                 Text(String(format: "%.2f", input.gain))
                     .font(.caption.monospacedDigit())
-                    .frame(width: 40, alignment: .trailing)
-            }
-            .disabled(!model.canEditInputs)
-            HStack {
+                    .frame(width: 36, alignment: .trailing)
                 Toggle("Skip if missing", isOn: model.skipIfMissingBinding(for: id))
                     .toggleStyle(.checkbox)
                     .font(.caption)
-                    .disabled(!model.canEditInputs)
-                Spacer()
             }
+            .disabled(!model.canEditInputs)
             inputMeter(for: id)
         }
         .padding(8)
