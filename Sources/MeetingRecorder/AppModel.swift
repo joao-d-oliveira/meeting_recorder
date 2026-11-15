@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
     private let locator = FFmpegLocator()
     private let pipelineLocator = PipelineLocator()
     private var cancellables: Set<AnyCancellable> = []
+    private var isQuitting = false
 
     var ffmpegPath: String? {
         let expandedOverride = settings.ffmpegPathOverride.map {
@@ -250,7 +251,7 @@ final class AppModel: ObservableObject {
 
     /// Runs the pipeline for the panel's file; the transcript lands in that file's folder.
     func startTranscription() {
-        guard !isTranscribing, let audio = transcriptionTarget else { return }
+        guard !isQuitting, !isTranscribing, let audio = transcriptionTarget else { return }
         transcriptionStartedAt = Date()
         transcriptionFinishedAt = nil
         transcription.start(
@@ -260,6 +261,12 @@ final class AppModel: ObservableObject {
 
     func cancelTranscription() {
         transcription.cancel()
+    }
+
+    /// Called once the user has agreed to quit: nothing may start a new pipeline run now
+    /// (stopping a recording saves it, which would otherwise auto-start a transcription).
+    func prepareForQuit() {
+        isQuitting = true
     }
 
     /// Back to the guest-name form for the same file (to re-run with another name).
