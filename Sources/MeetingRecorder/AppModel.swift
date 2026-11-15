@@ -34,6 +34,11 @@ final class AppModel: ObservableObject {
     /// started for: this only changes while no run is in progress, so a recording that is
     /// saved mid-run can never take over the panel (it waits in `pendingRecording`).
     @Published private(set) var transcriptionTarget: URL?
+    /// Where a run for `transcriptionTarget` would write the transcript. Worked out once per
+    /// target (and again when something that decides it may have changed), not per render:
+    /// the rule lists the audio's folder, and the panel redraws ~10 times a second while
+    /// recording and on every keystroke in the guest field.
+    @Published private(set) var transcriptionOutputDirectory: URL?
     /// Guest name typed in the panel (empty = `defaultGuestName` from the settings).
     @Published var guestName = ""
     @Published private(set) var transcriptionStartedAt: Date?
@@ -322,34 +327,40 @@ final class AppModel: ObservableObject {
             settings.transcription.interviewerName, fallback: "", lastResort: "Joao")
     }
 
-    /// What a run would use right now: the panel's file and guest name. The output directory
-    /// is left to `TranscriptionRequest`, which decides where the transcript goes; the
-    /// warnings below read it back from here instead of guessing from the audio's folder.
-    private func currentRequest() -> TranscriptionRequest? {
-        guard let audio = transcriptionTarget else { return nil }
-        return TranscriptionRequest(audioURL: audio, guestName: guestName)
-    }
-
     /// The transcript a run for the current panel would overwrite, if there already is one.
     var transcriptThatWouldBeReplaced: URL? {
-        guard let request = currentRequest() else { return nil }
+        guard let directory = transcriptionOutputDirectory else { return nil }
         let guest = TranscriptionRequest.sanitizedName(
-            request.guestName, fallback: settings.transcription.defaultGuestName)
-        let url = request.outputDirectory.appendingPathComponent("\(guest)_Transcript.md")
+            guestName, fallback: settings.transcription.defaultGuestName)
+        let url = directory.appendingPathComponent("\(guest)_Transcript.md")
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     /// Set when the transcript will not be written in the audio file's own folder.
     var transcriptOutputNote: String? {
-        guard let request = currentRequest() else { return nil }
-        let output = request.outputDirectory.standardizedFileURL
-        guard output != request.audioURL.deletingLastPathComponent().standardizedFileURL else { return nil }
+        guard let audio = transcriptionTarget,
+              let output = transcriptionOutputDirectory?.standardizedFileURL else { return nil }
+        guard output != audio.deletingLastPathComponent().standardizedFileURL else { return nil }
         return "The transcript is written to \"\(output.lastPathComponent)\" next to the audio file."
+    }
+
+    /// Recomputes `transcriptionOutputDirectory`. Called when the target changes and when a
+    /// run ends or is reset; the folder's contents can have changed since (another recording
+    /// saved next to this one moves the transcript into a subfolder).
+    private func refreshTranscriptionOutputDirectory() {
+        let directory = transcriptionTarget.map { TranscriptionRequest.defaultOutputDirectory(for: $0) }
+        if transcriptionOutputDirectory != directory { transcriptionOutputDirectory = directory }
     }
 
     /// Runs the pipeline for the panel's file.
     func startTranscription() {
-        guard !isQuitting, !isTranscribing, let request = currentRequest() else { return }
+        guard !isQuitting, !isTranscribing, let audio = transcriptionTarget else { return }
+        // Built now, not taken from the shown note: the request decides where the transcript
+        // goes from the folder as it is at click time.
+        let request = TranscriptionRequest(audioURL: audio, guestName: guestName)
+        if transcriptionOutputDirectory != request.outputDirectory {
+            transcriptionOutputDirectory = request.outputDirectory
+        }
         transcriptionStartedAt = Date()
         transcriptionFinishedAt = nil
         transcription.start(request: request, settings: settings.transcription)
@@ -371,6 +382,7 @@ final class AppModel: ObservableObject {
     func prepareTranscriptionRerun() {
         guard !isTranscribing else { return }
         transcription.reset()
+        refreshTranscriptionOutputDirectory()
     }
 
     /// "Transcribe a file…": any flac/wav/m4a/mp3, not only a fresh recording.
@@ -449,6 +461,7 @@ final class AppModel: ObservableObject {
             if transcriptionFinishedAt == nil, transcriptionStartedAt != nil {
                 transcriptionFinishedAt = Date()
             }
+            refreshTranscriptionOutputDirectory()
         }
         // A recording that was saved mid-run is transcribed next when auto-transcribe is on,
         // but only after a successful run: after a cancel or a failure the user decides.
@@ -468,6 +481,7 @@ final class AppModel: ObservableObject {
         }
         transcription.reset()
         transcriptionTarget = audio
+        refreshTranscriptionOutputDirectory()
         transcriptionStartedAt = nil
         transcriptionFinishedAt = nil
         guestName = ""
