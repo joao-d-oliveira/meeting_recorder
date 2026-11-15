@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import RecorderCore
 
@@ -70,14 +71,17 @@ func runRecordingControllerTests() {
     }
 
     test("level lines update the matching input's level") {
-        let (controller, fake) = makeController()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let (controller, fake) = makeController(clock: { now })
         controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
                          inputCount: 3)
         fake.emitStderr(levelLine(0, -20.0))
+        now.addTimeInterval(0.2)                    // past the shared publish window each time
         fake.emitStderr(levelLine(2, -7.5))
         try expectEqual(controller.levelsDB, [-20.0, -120, -7.5])
+        now.addTimeInterval(0.2)
         fake.emitStderr("[Parsed_ametadata_9 @ 0x2] lavfi.astats.Overall.RMS_level=-33.0")
-        try expectEqual(controller.levelsDB[1], -33.0)
+        try expectEqual(controller.levelsDB, [-20.0, -33.0, -7.5])
     }
 
     test("level lines from inputs that were not started are ignored") {
@@ -89,28 +93,87 @@ func runRecordingControllerTests() {
         try expectEqual(controller.levelsDB, [-120, -120])
     }
 
-    test("meter updates are throttled to 10 Hz per input, independently") {
-        var now = Date(timeIntervalSince1970: 1_000)
+    test("inputs share one 100 ms publish window; the latest value per input wins") {
+        let base = Date(timeIntervalSince1970: 1_000)
+        var now = base
+        let (controller, fake) = makeController(clock: { now })
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
+                         inputCount: 3)
+        var published: [[Double]] = []
+        let subscription = controller.$levelsDB.dropFirst().sink { published.append($0) }
+        defer { subscription.cancel() }
+
+        fake.emitStderr(levelLine(0, -30.0))        // first line opens the window: shown at once
+        try expectEqual(published, [[-30.0, -120, -120]])
+
+        now = base.addingTimeInterval(0.02)
+        fake.emitStderr(levelLine(1, -25.0))        // inside the window, whichever input: held back
+        fake.emitStderr(levelLine(2, -20.0))
+        now = base.addingTimeInterval(0.04)
+        fake.emitStderr(levelLine(1, -24.0))        // replaces the held -25
+        try expectEqual(published.count, 1)
+        try expectEqual(controller.levelsDB, [-30.0, -120, -120])
+
+        now = base.addingTimeInterval(0.11)
+        fake.emitStderr(levelLine(0, -10.0))        // window over: every input lands in ONE write
+        try expectEqual(published.count, 2)
+        try expectEqual(published.last, [-10.0, -24.0, -20.0])
+
+        now = base.addingTimeInterval(0.15)
+        fake.emitStderr(levelLine(2, -5.0))         // new window runs from the last publish
+        try expectEqual(published.count, 2)
+        now = base.addingTimeInterval(0.22)
+        fake.emitStderr(levelLine(1, -1.0))
+        try expectEqual(published.count, 3)
+        try expectEqual(published.last, [-10.0, -1.0, -5.0])
+    }
+
+    test("a level held back by the window is published by the next line after it, from any input") {
+        let base = Date(timeIntervalSince1970: 1_000)
+        var now = base
+        let (controller, fake) = makeController(clock: { now })
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
+                         inputCount: 3)
+        fake.emitStderr(levelLine(0, -30.0))
+        now = base.addingTimeInterval(0.05)
+        fake.emitStderr(levelLine(1, -25.0))
+        try expectEqual(controller.levelsDB[1], -120)
+
+        now = base.addingTimeInterval(0.12)
+        fake.emitStderr(levelLine(2, -9.0))         // not input 1's line, but it flushes input 1's value
+        try expectEqual(controller.levelsDB, [-30.0, -25.0, -9.0])
+    }
+
+    test("levels still pending when ffmpeg exits are published") {
+        let base = Date(timeIntervalSince1970: 1_000)
+        var now = base
         let (controller, fake) = makeController(clock: { now })
         controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
                          inputCount: 2)
         fake.emitStderr(levelLine(0, -30.0))
-        try expectEqual(controller.levelsDB[0], -30.0)
-
-        now.addTimeInterval(0.05)
-        fake.emitStderr(levelLine(0, -20.0))        // 50 ms later: dropped
-        fake.emitStderr(levelLine(1, -25.0))        // other input has its own window
+        now = base.addingTimeInterval(0.05)
+        fake.emitStderr(levelLine(1, -25.0))
+        fake.terminate(status: 1)
         try expectEqual(controller.levelsDB, [-30.0, -25.0])
+    }
 
-        now.addTimeInterval(0.06)
-        fake.emitStderr(levelLine(0, -10.0))        // 110 ms after the last publish: shown
-        try expectEqual(controller.levelsDB[0], -10.0)
-        fake.emitStderr(levelLine(1, -15.0))        // only 60 ms after input 1's publish: dropped
-        try expectEqual(controller.levelsDB[1], -25.0)
-
-        now.addTimeInterval(0.05)
-        fake.emitStderr(levelLine(1, -15.0))        // 110 ms after it: shown
-        try expectEqual(controller.levelsDB[1], -15.0)
+    test("a level inside the window does not count as a publish for the other inputs") {
+        // Regression guard for the old per-input windows: a quiet input must not be starved
+        // by a chatty one, nor the other way round.
+        let base = Date(timeIntervalSince1970: 1_000)
+        var now = base
+        let (controller, fake) = makeController(clock: { now })
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
+                         inputCount: 2)
+        var published = 0
+        let subscription = controller.$levelsDB.dropFirst().sink { _ in published += 1 }
+        defer { subscription.cancel() }
+        for step in 0..<10 {                        // 10 ms apart, both inputs, for 100 ms
+            now = base.addingTimeInterval(Double(step) * 0.01)
+            fake.emitStderr(levelLine(0, -30.0 + Double(step)))
+            fake.emitStderr(levelLine(1, -50.0 + Double(step)))
+        }
+        try expectEqual(published, 1)               // one write for 20 lines across two inputs
     }
 
     test("a new recording resets the levels") {
@@ -232,6 +295,34 @@ func runRecordingControllerTests() {
         try expect(message.contains("unexpectedly"), "unexpected message: \(message)")
         try expectEqual(tail.count, 20)
         try expectEqual(tail.last, "line 30")
+    }
+
+    test("meter lines and their frame headers stay out of the failure tail") {
+        func header(_ input: Int, _ frame: Int) -> String {
+            "[Parsed_ametadata_\(CommandBuilder.ametadataInstanceID(forInput: input)) @ 0x6000] "
+                + "frame:\(frame)    pts:\(frame * 1024)   pts_time:\(Double(frame) * 0.0213)"
+        }
+        let (controller, fake) = makeController()
+        controller.start(ffmpegPath: "/ff", arguments: [], outputURL: URL(fileURLWithPath: "/tmp/n.flac"),
+                         inputCount: 3)
+        fake.emitStderr("[avfoundation @ 0x1] Selected sample rate (48000) is not supported")
+        for frame in 0..<300 {                      // far more than 20 lines, and more than the 200-line cap
+            for input in 0..<3 {
+                fake.emitStderr(header(input, frame))
+                fake.emitStderr(levelLine(input, -20.0))
+            }
+        }
+        fake.emitStderr("[Parsed_astats_3 @ 0x2] some other filter message")
+        fake.emitStderr("Error writing trailer: No space left on device")
+        fake.terminate(status: 1)
+        guard case .failed(_, let tail) = controller.state else {
+            throw TestFailure(description: "expected .failed, got \(controller.state)")
+        }
+        try expectEqual(tail, [
+            "[avfoundation @ 0x1] Selected sample rate (48000) is not supported",
+            "[Parsed_astats_3 @ 0x2] some other filter message",
+            "Error writing trailer: No space left on device",
+        ])
     }
 
     test("can start a new recording after saved") {

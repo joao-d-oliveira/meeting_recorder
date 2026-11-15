@@ -27,7 +27,12 @@ public final class RecordingController: ObservableObject {
     private var stderrBuffer: [String] = []
     private var levelParser = LevelLineParser(inputCount: 0)
     private var escalationWork: [DispatchWorkItem] = []
-    private var lastLevelPublish: [Int: Date] = [:]
+    /// Latest unpublished level per input; applied together once the shared window allows.
+    private var pendingLevels: [Int: Double] = [:]
+    private var lastLevelPublish: Date?
+    /// ffmpeg emits ~50-100 level lines/sec per input, and every @Published write invalidates
+    /// the whole SwiftUI view tree, so all inputs share one ~10 Hz publish window.
+    private static let levelPublishInterval: TimeInterval = 0.1
 
     public init(
         makeProcess: @escaping () -> ProcessRunning = { FFmpegProcess() },
@@ -57,7 +62,8 @@ public final class RecordingController: ObservableObject {
 
         stderrBuffer = []
         levelParser = LevelLineParser(inputCount: inputCount)
-        lastLevelPublish = [:]
+        pendingLevels = [:]
+        lastLevelPublish = nil
         levelsDB = Array(repeating: LevelLineParser.silenceFloorDB, count: max(0, inputCount))
         self.outputURL = outputURL
         self.process = proc
@@ -87,18 +93,36 @@ public final class RecordingController: ObservableObject {
 
     private func handleStderr(_ line: String) {
         dispatchPrecondition(condition: .onQueue(.main))
+        if let sample = levelParser.parse(line: line), levelsDB.indices.contains(sample.inputIndex) {
+            // Meter chatter never enters stderrBuffer: it would push real errors out of the
+            // 20-line failure tail within a fraction of a second.
+            pendingLevels[sample.inputIndex] = sample.rmsDB     // latest value per input wins
+            publishPendingLevels(force: false)
+            return
+        }
+        if levelParser.isMeterHeader(line: line) { return }
+
         stderrBuffer.append(line)
         if stderrBuffer.count > 200 {
             stderrBuffer.removeFirst(stderrBuffer.count - 200)
         }
-        guard let sample = levelParser.parse(line: line) else { return }
-        guard levelsDB.indices.contains(sample.inputIndex) else { return }
-        // Throttle meter publishes to ~10 Hz per input: ffmpeg emits ~50-100 level
-        // lines/sec and every @Published write invalidates the whole SwiftUI view tree.
+    }
+
+    /// Applies every pending level in one assignment (one view invalidation). Unless forced,
+    /// that happens at most once per window; levels that arrive inside the window wait for
+    /// the next level line after it (ffmpeg sends them continuously) or for the process exit.
+    private func publishPendingLevels(force: Bool) {
+        guard !pendingLevels.isEmpty else { return }
         let now = clock()
-        if let last = lastLevelPublish[sample.inputIndex], now.timeIntervalSince(last) < 0.1 { return }
-        lastLevelPublish[sample.inputIndex] = now
-        levelsDB[sample.inputIndex] = sample.rmsDB
+        if !force, let last = lastLevelPublish,
+           now.timeIntervalSince(last) < Self.levelPublishInterval { return }
+        var updated = levelsDB
+        for (index, level) in pendingLevels where updated.indices.contains(index) {
+            updated[index] = level
+        }
+        pendingLevels = [:]
+        lastLevelPublish = now
+        levelsDB = updated
     }
 
     private func handleTermination(status: Int32) {
@@ -106,6 +130,7 @@ public final class RecordingController: ObservableObject {
         escalationWork.forEach { $0.cancel() }
         escalationWork = []
         process = nil
+        publishPendingLevels(force: true)
 
         switch state {
         case .stopping:

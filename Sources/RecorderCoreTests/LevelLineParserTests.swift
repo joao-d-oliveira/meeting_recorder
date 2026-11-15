@@ -42,6 +42,19 @@ func runLevelLineParserTests() {
                    "progress line parsed")
     }
 
+    test("recognizes ametadata frame headers, and nothing else, as meter headers") {
+        let parser = LevelLineParser(inputCount: 3)
+        for id in [4, 9, 14] {
+            try expect(parser.isMeterHeader(
+                line: "[Parsed_ametadata_\(id) @ 0x6000] frame:120  pts:122880  pts_time:2.56"),
+                "header of instance \(id) not recognized")
+        }
+        try expect(!parser.isMeterHeader(line: line(4, "-20.0")), "level line is not a header")
+        try expect(!parser.isMeterHeader(line: "[Parsed_astats_3 @ 0x6000] frame:120"), "other filter")
+        try expect(!parser.isMeterHeader(line: "size=     512KiB time=00:00:10.00"), "progress line")
+        try expect(!parser.isMeterHeader(line: "Error: frame:12 dropped"), "free text")
+    }
+
     test("ignores ametadata instances that are not an input's meter") {
         let parser = LevelLineParser(inputCount: 3)
         for id in [0, 3, 5, 7, 8, 10, 13] {
