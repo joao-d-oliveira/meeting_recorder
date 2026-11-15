@@ -406,7 +406,7 @@ func runPipelineScriptTests() {
         try expect(result.stdout.contains("PROGRESS: 40"), "no progress line in \(result.stdout)")
         try expect(FileManager.default.fileExists(atPath: out.appendingPathComponent("Dana_Transcript.md").path))
         try expect(FileManager.default.fileExists(atPath: out.appendingPathComponent("Dana_Transcript.summary.json").path))
-        try expectEqual(stub.cacheFiles(withSuffix: ".wav").count, 1)
+        try expectEqual(stub.cacheFiles(withSuffix: ".wav").count, 0)  // run.sh deletes the 16 kHz WAV after a successful run
         try expectEqual(stub.cacheFiles(withSuffix: ".json").count, 1)
         try expect(stub.cacheFiles(withSuffix: ".part").isEmpty, "partial files left behind")
         try expectEqual(result.stderr, [])
@@ -419,7 +419,7 @@ func runPipelineScriptTests() {
         _ = try runScript(stub, [out, "Dana:\(audio.path)"])
         let second = try runScript(stub, [out, "Dana:\(audio.path)"])
         try expectEqual(second.status, 0)
-        try expectEqual(stub.ffmpegCalls, 1)
+        try expectEqual(stub.ffmpegCalls, 2)  // converted again (the WAV was deleted); Whisper is skipped
         try expect(second.stdout.contains("Using cached transcription"), "\(second.stdout)")
         try expectEqual(stageLines(second), ["STAGE: convert", "STAGE: transcribe", "STAGE: diarize", "STAGE: done"])
     }
@@ -434,7 +434,7 @@ func runPipelineScriptTests() {
         try expect(!result.stdout.contains("Using cached transcription"), "second recording reused the first's transcript")
         try expect(!result.stdout.contains("Using cached 16 kHz conversion"), "second recording reused the first's WAV")
         try expectEqual(stub.ffmpegCalls, 2)
-        try expectEqual(stub.cacheFiles(withSuffix: ".wav").count, 2)
+        try expectEqual(stub.cacheFiles(withSuffix: ".wav").count, 0)  // both WAVs are deleted after the run; the JSONs stay
         try expectEqual(stub.cacheFiles(withSuffix: ".json").count, 2)
     }
 
