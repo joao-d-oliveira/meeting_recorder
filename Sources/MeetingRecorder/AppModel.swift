@@ -19,6 +19,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var recordedInputIDs: [UUID] = []
     @Published var showSettingsSheet = false
     @Published var showFolderPicker = false
+    /// Height of the window's content as laid out, before the screen caps the window; 0 until
+    /// measured. Kept here because view state does not live in property wrappers in this app.
+    @Published private(set) var contentHeight: CGFloat = 0
     /// True while a device scan runs in the background (it can take a moment, and a stuck
     /// one is killed after `DeviceScanner.defaultTimeout`).
     @Published private(set) var isScanningDevices = false
@@ -319,6 +322,12 @@ final class AppModel: ObservableObject {
         guard let position = recordedInputIDs.firstIndex(of: id),
               controller.levelsDB.indices.contains(position) else { return nil }
         return controller.levelsDB[position]
+    }
+
+    func updateContentHeight(_ height: CGFloat) {
+        // Sub-point changes would only republish for nothing.
+        guard abs(height - contentHeight) >= 0.5 else { return }
+        contentHeight = height
     }
 
     func revealInFinder(_ url: URL) {

@@ -5,18 +5,27 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            inputsSection
-            Divider()
-            outputSection
-            Divider()
-            controlSection
-            statusSection
-            Divider()
-            TranscriptionPanel()
+        // The window is sized to its content (.windowResizability(.contentSize)), and a
+        // ScrollView has no height of its own, so the height is given explicitly: the content's
+        // measured height, capped to what fits on the screen. Short content makes a window
+        // that hugs it, exactly as without the ScrollView; content taller than the screen
+        // (an open "Pipeline output" log, several issues, a long failure message) scrolls
+        // instead of running off the bottom edge.
+        ScrollView {
+            content
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
+                    })
         }
-        .padding(20)
-        .frame(width: 500)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: 500, height: windowContentHeight)
+        .onPreferenceChange(ContentHeightKey.self) { height in
+            // Not synchronously: this runs during a layout pass, and the model publishes.
+            DispatchQueue.main.async { model.updateContentHeight(height) }
+        }
         .fileImporter(isPresented: $model.showFolderPicker, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 model.settings.outputFolder = url
@@ -29,13 +38,44 @@ struct ContentView: View {
         .background(WindowCloseLock(isLocked: model.isCloseLocked))
     }
 
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            inputsSection
+            Divider()
+            outputSection
+            Divider()
+            controlSection
+            statusSection
+            Divider()
+            TranscriptionPanel()
+        }
+    }
+
+    /// Room the window has on this screen: the visible area (no menu bar, no Dock) minus the
+    /// title bar and some air.
+    private static var maxWindowContentHeight: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
+        return max(300, screenHeight - 48)
+    }
+
+    /// Until the content has been measured once (the first layout pass), a typical height: the
+    /// inputs list at its maximum plus the roughly 420 pt the rest needs when idle.
+    private static var unmeasuredHeight: CGFloat { inputsMaxHeight + 420 }
+
+    private var windowContentHeight: CGFloat {
+        let wanted = model.contentHeight > 0 ? model.contentHeight : Self.unmeasuredHeight
+        return min(wanted, Self.maxWindowContentHeight)
+    }
+
     /// Height the inputs list may take before it scrolls. Everything else in the window
-    /// (output, controls, status, the transcription panel, padding) needs roughly 600-650 pt,
-    /// so the list gets what is left of the screen, between 150 pt (a bit over one row) and
-    /// 340 pt (all of three inputs, with their meters, and some room).
+    /// (output, controls, status, the transcription panel, padding) needs roughly 600-650 pt
+    /// with a finished transcript showing, so the list gets what is left of the screen after
+    /// that and the title bar, between 150 pt (a bit over one row) and 340 pt (all of three
+    /// inputs, with their meters, and some room). If the rest grows beyond that, the whole
+    /// window scrolls (see `body`).
     private static var inputsMaxHeight: CGFloat {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
-        return min(340, max(150, screenHeight - 650))
+        return min(340, max(150, screenHeight - 700))
     }
 
     private var inputsSection: some View {
@@ -262,5 +302,14 @@ struct ContentView: View {
 
     private func elapsedString(from start: Date, to now: Date) -> String {
         formatClock(now.timeIntervalSince(start))
+    }
+}
+
+/// The content's height, reported up from a GeometryReader behind it.
+private struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
